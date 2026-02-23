@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -49,8 +49,8 @@ def main() -> None:
 
     tfidf_by_domain: dict[str, pd.Series] = {}
     for d in domains:
-        idx = corpus["domain"] == d
-        mean_scores = x[idx].mean(axis=0).A1
+        idx_mask = (corpus["domain"] == d).to_numpy()
+        mean_scores = x[idx_mask].mean(axis=0).A1
         tfidf_by_domain[d] = pd.Series(mean_scores, index=terms).sort_values(ascending=False)
 
     # Unigram log-odds with add-one smoothing.
