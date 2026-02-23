@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Literal
+import hashlib
 
 import joblib
 from dotenv import load_dotenv
@@ -68,6 +69,7 @@ class TranslateResponse(BaseModel):
     used_fallback: bool
     num_attempted: int
     num_returned: int
+    cache_hit: bool = False
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
@@ -84,6 +86,7 @@ app.add_middleware(
 clf = None
 lexicon_by_domain: dict[str, list[str]] = {}
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
+_response_cache: dict[str, tuple[float, TranslateResponse]] = {}
 
 
 def _load_artifacts() -> None:
@@ -137,6 +140,18 @@ def _load_artifacts() -> None:
     lexicon_by_domain = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
 
 
+def _normalize_text(text: str, max_chars: int) -> str:
+    cleaned = " ".join(text.strip().split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[:max_chars]
+
+
+def _cache_key(text: str, src: str, tgt: str, k: int) -> str:
+    raw = f"{src}|{tgt}|{k}|{text}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     try:
@@ -161,9 +176,53 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    max_input_chars = max(128, int(os.getenv("GEMINI_MAX_INPUT_CHARS", "1200")))
+    normalized_text = _normalize_text(payload.text, max_input_chars)
+
+    # Fast path: same-domain translation needs no expensive generation.
+    if payload.src == payload.tgt:
+        reward = compute_reward(
+            source_text=normalized_text,
+            candidate=normalized_text,
+            tgt=payload.tgt,
+            clf=clf,
+            lexicon_by_domain=lexicon_by_domain,
+            w_domain=0.5,
+            w_meaning=0.3,
+            w_lex=0.2,
+        )
+        candidate = CandidateScore(
+            text=normalized_text,
+            total_score=reward.total,
+            breakdown={
+                "domain": reward.breakdown.domain,
+                "meaning": reward.breakdown.meaning,
+                "lex": reward.breakdown.lex,
+            },
+            temperature=0.0,
+        )
+        return TranslateResponse(
+            best_candidate=candidate.text,
+            best_score=candidate.total_score,
+            score_breakdown=candidate.breakdown,
+            candidates=[candidate],
+            prompt_action="identity",
+            used_fallback=False,
+            num_attempted=0,
+            num_returned=1,
+            cache_hit=True,
+        )
+
+    cache_ttl_sec = max(0, int(os.getenv("CACHE_TTL_SEC", "3600")))
+    request_key = _cache_key(normalized_text, payload.src, payload.tgt, payload.k)
+    if cache_ttl_sec > 0 and request_key in _response_cache:
+        cached_ts, cached_resp = _response_cache[request_key]
+        if (time.time() - cached_ts) <= cache_ttl_sec:
+            return cached_resp.model_copy(update={"cache_hit": True})
+
     route_key = f"{payload.src}->{payload.tgt}"
     action = bandit.choose(route_key)
-    prompt = build_prompt(action=action, text=payload.text, src=payload.src, tgt=payload.tgt)
+    prompt = build_prompt(action=action, text=normalized_text, src=payload.src, tgt=payload.tgt)
 
     total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "1"))
     total_runs = max(1, total_runs_env)
@@ -200,9 +259,9 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         # return best effort instead of failing the whole request.
         if last_quota_error is not None:
             if not candidate_pool:
-                fallback_text = payload.text
+                fallback_text = normalized_text
                 fallback_reward = compute_reward(
-                    source_text=payload.text,
+                    source_text=normalized_text,
                     candidate=fallback_text,
                     tgt=payload.tgt,
                     clf=clf,
@@ -226,11 +285,11 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             break
 
         if not candidate.strip():
-            candidate = payload.text
+            candidate = normalized_text
             used_fallback = True
 
         reward = compute_reward(
-            source_text=payload.text,
+            source_text=normalized_text,
             candidate=candidate,
             tgt=payload.tgt,
             clf=clf,
@@ -274,7 +333,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     best = scored[0]
     bandit.update(route_key, action, best.total_score)
 
-    return TranslateResponse(
+    response = TranslateResponse(
         best_candidate=best.text,
         best_score=best.total_score,
         score_breakdown=best.breakdown,
@@ -283,7 +342,11 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         used_fallback=used_fallback,
         num_attempted=num_attempted,
         num_returned=len(scored),
+        cache_hit=False,
     )
+    if cache_ttl_sec > 0:
+        _response_cache[request_key] = (time.time(), response)
+    return response
 
 
 if __name__ == "__main__":
