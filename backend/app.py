@@ -41,7 +41,7 @@ class TranslateRequest(BaseModel):
     text: str = Field(min_length=3)
     src: Domain
     tgt: Domain
-    k: int = Field(default=2, ge=2, le=8)
+    k: int = Field(default=1, ge=1, le=8)
 
 
 def _temperature_for_step(step: int, total_steps: int) -> float:
@@ -165,8 +165,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     action = bandit.choose(route_key)
     prompt = build_prompt(action=action, text=payload.text, src=payload.src, tgt=payload.tgt)
 
-    total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "16"))
-    total_runs = max(payload.k, total_runs_env)
+    total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "1"))
+    total_runs = max(1, total_runs_env)
     inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
     max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "2")))
     retry_sleep = float(os.getenv("GEMINI_RETRY_SLEEP_SEC", "1.5"))
