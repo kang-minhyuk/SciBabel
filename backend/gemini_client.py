@@ -6,6 +6,8 @@ import requests
 
 DEFAULT_GEMINI_MODELS = [
     "gemini-3.0-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
 ]
 
 
@@ -22,7 +24,9 @@ def generate_with_gemini(prompt: str, temperature: float, top_p: float) -> str:
         )
 
     configured_model = os.getenv("GEMINI_MODEL", "").strip()
-    models = [configured_model] if configured_model else DEFAULT_GEMINI_MODELS
+    models = [configured_model] + DEFAULT_GEMINI_MODELS if configured_model else DEFAULT_GEMINI_MODELS
+    # De-duplicate while preserving order.
+    models = list(dict.fromkeys(models))
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -35,19 +39,28 @@ def generate_with_gemini(prompt: str, temperature: float, top_p: float) -> str:
 
     data: dict = {}
     last_error: Exception | None = None
-    for model in models:
+    for idx, model in enumerate(models):
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent?key={api_key}"
         )
         response = requests.post(url, json=payload, timeout=45)
+        status_code = response.status_code
         try:
             response.raise_for_status()
             data = response.json()
             break
         except Exception as exc:
             last_error = exc
-            if not configured_model:
+            is_last = idx == (len(models) - 1)
+            # Auth errors should fail immediately.
+            if status_code in (401, 403):
+                raise
+            # Try next model on model-not-found or throttling.
+            if status_code in (404, 429) and not is_last:
+                continue
+            # For other transient/provider errors, try next model if available.
+            if not is_last:
                 continue
             raise
 
