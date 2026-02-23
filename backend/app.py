@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
 import hashlib
@@ -292,107 +293,81 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         term_instructions=term_instruction_block,
     )
 
-    total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "16"))
-    total_runs = max(payload.k, total_runs_env)
-    inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
-    max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "2")))
+    num_generations = payload.k
+    max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "0")))
     retry_sleep = float(os.getenv("GEMINI_RETRY_SLEEP_SEC", "1.5"))
     strategy_penalty_weight = float(os.getenv("STRATEGY_PENALTY_WEIGHT", "0.15"))
 
     candidate_pool: dict[str, CandidateScore] = {}
     used_fallback = False
     num_attempted = 0
-    for i in range(total_runs):
-        temp = _temperature_for_step(i, total_runs)
-        num_attempted += 1
-        candidate = ""
-        last_quota_error: Exception | None = None
+
+    def _generate_one(temp: float) -> tuple[str, int, bool]:
+        local_attempts = 0
         for retry_idx in range(max_retries + 1):
+            local_attempts += 1
             try:
-                candidate = _generate_with_provider(prompt=prompt, temperature=temp, top_p=0.95)
-                last_quota_error = None
-                break
+                text = _generate_with_provider(prompt=prompt, temperature=temp, top_p=0.95)
+                return text, local_attempts, False
             except NotImplementedError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             except Exception as exc:
                 message = str(exc)
                 quota_like = ("429" in message) or ("RESOURCE_EXHAUSTED" in message)
-                if quota_like:
-                    last_quota_error = exc
-                    if retry_idx < max_retries and retry_sleep > 0:
-                        time.sleep(retry_sleep)
+                if quota_like and retry_idx < max_retries and retry_sleep > 0:
+                    time.sleep(retry_sleep)
                     continue
-                raise HTTPException(status_code=502, detail=f"Gemini call failed: {exc}") from exc
+                if quota_like:
+                    return normalized_text, local_attempts, True
+                # Non-quota generation error: degrade gracefully for this slot.
+                return normalized_text, local_attempts, True
 
-        # Free-tier API keys can throttle quickly. If retries still fail,
-        # return best effort instead of failing the whole request.
-        if last_quota_error is not None:
-            if not candidate_pool:
-                fallback_text = normalized_text
-                fallback_reward = compute_reward(
-                    source_text=normalized_text,
-                    candidate=fallback_text,
-                    tgt=payload.tgt,
-                    clf=clf,
-                    lexicon_by_domain=lexicon_by_domain,
-                    w_domain=0.5,
-                    w_meaning=0.3,
-                    w_lex=0.2,
-                )
-                fallback = CandidateScore(
-                    text=fallback_text,
-                    total_score=fallback_reward.total,
-                    breakdown={
-                        "domain": fallback_reward.breakdown.domain,
-                        "meaning": fallback_reward.breakdown.meaning,
-                        "lex": fallback_reward.breakdown.lex,
-                    },
-                    temperature=temp,
-                )
-                candidate_pool[fallback.text] = fallback
+    temperatures = [_temperature_for_step(i, max(2, num_generations)) for i in range(num_generations)]
+
+    with ThreadPoolExecutor(max_workers=max(1, num_generations)) as executor:
+        future_map = {executor.submit(_generate_one, t): t for t in temperatures}
+        for future in as_completed(future_map):
+            temp = future_map[future]
+            candidate, attempts, slot_fallback = future.result()
+            num_attempted += attempts
+            used_fallback = used_fallback or slot_fallback
+
+            if not candidate.strip():
+                candidate = normalized_text
                 used_fallback = True
-            break
 
-        if not candidate.strip():
-            candidate = normalized_text
-            used_fallback = True
+            reward = compute_reward(
+                source_text=normalized_text,
+                candidate=candidate,
+                tgt=payload.tgt,
+                clf=clf,
+                lexicon_by_domain=lexicon_by_domain,
+                w_domain=0.5,
+                w_meaning=0.3,
+                w_lex=0.2,
+            )
+            strat_pen = strategy_penalty(candidate, strategies)
+            final_score = reward.total - (strategy_penalty_weight * strat_pen)
 
-        reward = compute_reward(
-            source_text=normalized_text,
-            candidate=candidate,
-            tgt=payload.tgt,
-            clf=clf,
-            lexicon_by_domain=lexicon_by_domain,
-            w_domain=0.5,
-            w_meaning=0.3,
-            w_lex=0.2,
-        )
-        strat_pen = strategy_penalty(candidate, strategies)
-        final_score = reward.total - (strategy_penalty_weight * strat_pen)
+            scored_candidate = CandidateScore(
+                text=candidate,
+                total_score=final_score,
+                breakdown={
+                    "domain": reward.breakdown.domain,
+                    "meaning": reward.breakdown.meaning,
+                    "lex": reward.breakdown.lex,
+                    "strategy_penalty": strat_pen,
+                },
+                temperature=temp,
+            )
 
-        scored_candidate = CandidateScore(
-            text=candidate,
-            total_score=final_score,
-            breakdown={
-                "domain": reward.breakdown.domain,
-                "meaning": reward.breakdown.meaning,
-                "lex": reward.breakdown.lex,
-                "strategy_penalty": strat_pen,
-            },
-            temperature=temp,
-        )
+            existing = candidate_pool.get(scored_candidate.text)
+            if existing is None or scored_candidate.total_score > existing.total_score:
+                candidate_pool[scored_candidate.text] = scored_candidate
 
-        existing = candidate_pool.get(scored_candidate.text)
-        if existing is None or scored_candidate.total_score > existing.total_score:
-            candidate_pool[scored_candidate.text] = scored_candidate
-
-        # Keep only top-k candidates while iterating many calls.
-        top_k = sorted(candidate_pool.values(), key=lambda c: c.total_score, reverse=True)[: payload.k]
-        candidate_pool = {c.text: c for c in top_k}
-
-        # Avoid bursty requests on free-tier quotas.
-        if i < total_runs - 1 and inter_call_sleep > 0:
-            time.sleep(inter_call_sleep)
+    # Keep only top-k after parallel generation.
+    top_k = sorted(candidate_pool.values(), key=lambda c: c.total_score, reverse=True)[: payload.k]
+    candidate_pool = {c.text: c for c in top_k}
 
     scored = sorted(candidate_pool.values(), key=lambda c: c.total_score, reverse=True)
 

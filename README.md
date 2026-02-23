@@ -81,4 +81,4 @@ Backend env vars:
 
 - `GEMINI_API_KEY=<your-key>`
 - `BACKEND_CORS_ORIGINS=https://sci-babel.vercel.app`
-- Optional: `GEMINI_TOTAL_RUNS=16`, `GEMINI_INTER_CALL_SLEEP_SEC=0.6`
+- Optional: `GEMINI_MAX_RETRIES=0`, `GEMINI_RETRY_SLEEP_SEC=1.5`

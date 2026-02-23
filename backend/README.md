@@ -50,8 +50,8 @@ Backend supports provider switch via `LLM_PROVIDER`:
 
 ### Optional env vars
 
-- `GEMINI_TOTAL_RUNS` (default `16`)
-- `GEMINI_INTER_CALL_SLEEP_SEC` (default `0.6`)
+- `GEMINI_MAX_RETRIES` (default `0`; each candidate is generated once by default)
+- `GEMINI_RETRY_SLEEP_SEC` (default `1.5`)
 - `GEMINI_MODEL` (optional model pin)
 
 ### Render/Fly/Railway start command
