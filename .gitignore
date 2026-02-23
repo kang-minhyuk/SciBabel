@@ -28,3 +28,6 @@ data/processed/**
 # macOS / editor
 .DS_Store
 .vscode/
+
+# Evaluation outputs
+logs/

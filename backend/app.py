@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -212,6 +213,36 @@ def _cache_key(text: str, src: str, tgt: str, k: int) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _rule_based_fallback_translation(text: str, tgt: str, strategies: list[TermStrategy]) -> str:
+    """Deterministic local fallback when LLM provider is unavailable.
+
+    Keeps semantics mostly intact while applying lightweight domain-term reframing.
+    """
+    out = text
+
+    for s in strategies:
+        term_pat = re.compile(rf"\\b{re.escape(s.term)}\\b", re.IGNORECASE)
+        if s.type == "analogous" and s.neighbor:
+            out = term_pat.sub(s.neighbor, out)
+        elif s.type == "intranslatable":
+            if term_pat.search(out) and "domain-specific concept" not in out.lower():
+                out = term_pat.sub(f"{s.term} (domain-specific concept)", out, count=1)
+        elif s.type == "unique":
+            if term_pat.search(out) and "(" not in out:
+                out = term_pat.sub(f"{s.term} (specialized term)", out, count=1)
+
+    lead_map = {
+        "CSM": "From a computational modeling perspective, ",
+        "PM": "From a physics-oriented interpretation, ",
+        "CCE": "From a process-engineering standpoint, ",
+    }
+    lead = lead_map.get(tgt, f"In {tgt} terms, ")
+    lowered = out[0].lower() + out[1:] if len(out) > 1 else out
+    out = f"{lead}{lowered}"
+
+    return out
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     global semantic_enabled
@@ -232,7 +263,7 @@ def health() -> dict[str, str]:
 
 @app.post("/translate", response_model=TranslateResponse)
 def translate(payload: TranslateRequest) -> TranslateResponse:
-    global clf, lexicon_by_domain, term_strategy_engine
+    global clf, lexicon_by_domain, term_strategy_engine, semantic_enabled
 
     if clf is None or not lexicon_by_domain:
         try:
@@ -315,6 +346,11 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     retry_sleep = float(os.getenv("GEMINI_RETRY_SLEEP_SEC", "1.5"))
     strategy_penalty_weight = float(os.getenv("STRATEGY_PENALTY_WEIGHT", "0.15"))
     min_semantic_sim = float(os.getenv("MIN_SEMANTIC_SIM", "0.78"))
+    if not semantic_enabled:
+        min_semantic_sim = min(
+            min_semantic_sim,
+            float(os.getenv("MIN_SEMANTIC_SIM_FALLBACK", "0.45")),
+        )
     alpha_lex = float(os.getenv("ALPHA_LEX", "0.35"))
     beta_copy = float(os.getenv("BETA_COPY", "0.5"))
     copy_threshold = float(os.getenv("COPY_THRESHOLD", "0.86"))
@@ -352,7 +388,12 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 text = _generate_with_provider(prompt=prompt, temperature=temp, top_p=0.95)
                 return text, action_name, local_attempts, False
             except NotImplementedError as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
+                fallback_text = _rule_based_fallback_translation(
+                    text=normalized_text,
+                    tgt=payload.tgt,
+                    strategies=strategies,
+                )
+                return fallback_text, action_name, local_attempts, True
             except Exception as exc:
                 message = str(exc)
                 quota_like = ("429" in message) or ("RESOURCE_EXHAUSTED" in message)
@@ -459,7 +500,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         used_fallback = True
 
     best = scored[0]
-    bandit.update(route_key, best.action, best.total_score)
+    if best.action in get_prompt_action_names():
+        bandit.update(route_key, best.action, best.total_score)
 
     response = TranslateResponse(
         best_candidate=best.text,

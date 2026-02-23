@@ -42,6 +42,9 @@ Where:
 - $E_{lex}$ is weighted lexical evidence from `term_stats.csv` log-odds (fallback: lexicon coverage)
 - $C_{copy}$ is ROUGE-L based source-copy score
 
+If embedding model is unavailable at runtime, backend automatically uses a lower semantic threshold
+(`MIN_SEMANTIC_SIM_FALLBACK`) to avoid over-filtering all candidates.
+
 5. Apply strategy penalty from term policy layer and rerank.
 6. Return best output with transparent metadata (`semantic_sim`, `copy_score`, `lex_terms_hit`, actions used, source-warning signals).
 
