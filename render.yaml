@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: scibabel-backend
+    runtime: python
+    rootDir: .
+    buildCommand: >-
+      pip install -r backend/requirements.txt &&
+      python scripts/03_mine_terms.py --corpus data/processed/sample_corpus.jsonl --lexicon-out data/processed/domain_lexicon.json --term-stats-out data/processed/term_stats.csv --top-n 120 &&
+      python scripts/04_train_domain_classifier.py --corpus data/processed/sample_corpus.jsonl --model-out models/domain_clf.joblib
+    startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: BACKEND_CORS_ORIGINS
+        value: https://your-frontend-domain.vercel.app
+      - key: GEMINI_TOTAL_RUNS
+        value: "16"
+      - key: GEMINI_INTER_CALL_SLEEP_SEC
+        value: "0.6"

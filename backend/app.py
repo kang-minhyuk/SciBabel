@@ -26,6 +26,15 @@ MODEL_PATH = ROOT / "models" / "domain_clf.joblib"
 LEXICON_PATH = ROOT / "data" / "processed" / "domain_lexicon.json"
 
 
+def _get_cors_origins() -> list[str]:
+    raw = os.getenv(
+        "BACKEND_CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    )
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["http://localhost:3000"]
+
+
 class TranslateRequest(BaseModel):
     text: str = Field(min_length=3)
     src: Domain
@@ -60,10 +69,12 @@ class TranslateResponse(BaseModel):
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
+cors_origins = _get_cors_origins()
+allow_credentials = cors_origins != ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

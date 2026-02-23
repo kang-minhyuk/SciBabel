@@ -59,3 +59,24 @@ Train domain classifier:
 - Set `GEMINI_API_KEY` in `.env` to enable live generation.
 - If Gemini is not configured, `/translate` returns a clear error.
 - Bandit prompt selection is in-memory for MVP.
+
+## Deploy (website-first)
+
+### Frontend (Vercel)
+
+- Import this GitHub repo into Vercel.
+- Set project root to `frontend/`.
+- Add env var: `NEXT_PUBLIC_API_BASE_URL=https://<your-backend-domain>`.
+
+### Backend (Render)
+
+- Create a new Web Service from this repo.
+- Root directory: `backend/`
+- Build command: `pip install -r requirements.txt && cd .. && python scripts/03_mine_terms.py --corpus data/processed/sample_corpus.jsonl --lexicon-out data/processed/domain_lexicon.json --term-stats-out data/processed/term_stats.csv --top-n 120 && python scripts/04_train_domain_classifier.py --corpus data/processed/sample_corpus.jsonl --model-out models/domain_clf.joblib`
+- Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+
+Backend env vars:
+
+- `GEMINI_API_KEY=<your-key>`
+- `BACKEND_CORS_ORIGINS=https://<your-frontend-domain>`
+- Optional: `GEMINI_TOTAL_RUNS=16`, `GEMINI_INTER_CALL_SLEEP_SEC=0.6`
