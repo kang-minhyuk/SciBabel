@@ -72,9 +72,9 @@ Train domain classifier:
 ### Backend (Render)
 
 - Create a new Web Service from this repo.
-- Root directory: `backend/`
-- Build command: `pip install -r requirements.txt && cd .. && python scripts/03_mine_terms.py --corpus data/processed/sample_corpus.jsonl --lexicon-out data/processed/domain_lexicon.json --term-stats-out data/processed/term_stats.csv --top-n 120 && python scripts/04_train_domain_classifier.py --corpus data/processed/sample_corpus.jsonl --model-out models/domain_clf.joblib`
-- Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+- Root directory: leave empty (repo root)
+- Build command: `pip install -r backend/requirements.txt`
+- Start command: `cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT`
 
 Backend env vars:
 

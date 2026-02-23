@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Literal
@@ -86,6 +88,41 @@ bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 
 def _load_artifacts() -> None:
     global clf, lexicon_by_domain
+
+    if not MODEL_PATH.exists() or not LEXICON_PATH.exists():
+        sample_corpus = ROOT / "data" / "processed" / "sample_corpus.jsonl"
+        if not sample_corpus.exists():
+            raise FileNotFoundError(
+                f"Missing sample corpus at {sample_corpus}; cannot bootstrap artifacts."
+            )
+
+        # Bootstrap lightweight artifacts at runtime for first deploy.
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "03_mine_terms.py"),
+                "--corpus",
+                str(sample_corpus),
+                "--lexicon-out",
+                str(LEXICON_PATH),
+                "--term-stats-out",
+                str(ROOT / "data" / "processed" / "term_stats.csv"),
+                "--top-n",
+                "120",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "04_train_domain_classifier.py"),
+                "--corpus",
+                str(sample_corpus),
+                "--model-out",
+                str(MODEL_PATH),
+            ],
+            check=True,
+        )
 
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
