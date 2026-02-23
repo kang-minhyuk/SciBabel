@@ -374,7 +374,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     if not scored:
         raise HTTPException(
             status_code=502,
-            detail="Gemini did not return any candidate. Try again later or reduce GEMINI_TOTAL_RUNS.",
+            detail="LLM did not return any candidate. Try again later or reduce k.",
         )
 
     best = scored[0]
