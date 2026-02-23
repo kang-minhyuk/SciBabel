@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Data and models
+data/raw/**
+models/**
+
+# Keep processed directory mostly ignored, but keep samples/checkpoints
+!data/processed/
+data/processed/**
+!data/processed/.gitkeep
+!data/processed/sample_*.jsonl
+!data/processed/sample_*.parquet
+!data/processed/domain_lexicon.json
+!data/processed/term_stats.csv
+
+# macOS / editor
+.DS_Store
+.vscode/
