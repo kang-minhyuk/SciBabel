@@ -4,7 +4,10 @@ import os
 
 import requests
 
-GEMINI_MODEL = "gemini-1.5-flash"
+DEFAULT_GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
 
 
 def generate_with_gemini(prompt: str, temperature: float, top_p: float) -> str:
@@ -19,10 +22,9 @@ def generate_with_gemini(prompt: str, temperature: float, top_p: float) -> str:
             "GEMINI_API_KEY is not configured. Set it in your .env to enable translation."
         )
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={api_key}"
-    )
+    configured_model = os.getenv("GEMINI_MODEL", "").strip()
+    models = [configured_model] if configured_model else DEFAULT_GEMINI_MODELS
+
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -32,9 +34,28 @@ def generate_with_gemini(prompt: str, temperature: float, top_p: float) -> str:
         },
     }
 
-    response = requests.post(url, json=payload, timeout=45)
-    response.raise_for_status()
-    data = response.json()
+    data: dict = {}
+    last_error: Exception | None = None
+    for model in models:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={api_key}"
+        )
+        response = requests.post(url, json=payload, timeout=45)
+        if response.status_code == 404 and not configured_model:
+            # Try next default model if endpoint/model combo is unavailable.
+            continue
+        try:
+            response.raise_for_status()
+            data = response.json()
+            break
+        except Exception as exc:
+            last_error = exc
+            if configured_model:
+                raise
+
+    if not data and last_error is not None:
+        raise last_error
 
     candidates = data.get("candidates", [])
     if not candidates:
