@@ -168,6 +168,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "16"))
     total_runs = max(payload.k, total_runs_env)
     inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
+    max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "2")))
+    retry_sleep = float(os.getenv("GEMINI_RETRY_SLEEP_SEC", "1.5"))
 
     candidate_pool: dict[str, CandidateScore] = {}
     used_fallback = False
@@ -175,42 +177,53 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     for i in range(total_runs):
         temp = _temperature_for_step(i, total_runs)
         num_attempted += 1
-        try:
-            candidate = generate_with_gemini(prompt=prompt, temperature=temp, top_p=0.95)
-        except NotImplementedError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            message = str(exc)
-            quota_like = ("429" in message) or ("RESOURCE_EXHAUSTED" in message)
-            # Free-tier API keys can throttle quickly. If we already have
-            # candidates, return best effort instead of failing the whole request.
-            if quota_like:
-                if not candidate_pool:
-                    fallback_text = payload.text
-                    fallback_reward = compute_reward(
-                        source_text=payload.text,
-                        candidate=fallback_text,
-                        tgt=payload.tgt,
-                        clf=clf,
-                        lexicon_by_domain=lexicon_by_domain,
-                        w_domain=0.5,
-                        w_meaning=0.3,
-                        w_lex=0.2,
-                    )
-                    fallback = CandidateScore(
-                        text=fallback_text,
-                        total_score=fallback_reward.total,
-                        breakdown={
-                            "domain": fallback_reward.breakdown.domain,
-                            "meaning": fallback_reward.breakdown.meaning,
-                            "lex": fallback_reward.breakdown.lex,
-                        },
-                        temperature=temp,
-                    )
-                    candidate_pool[fallback.text] = fallback
-                    used_fallback = True
+        candidate = ""
+        last_quota_error: Exception | None = None
+        for retry_idx in range(max_retries + 1):
+            try:
+                candidate = generate_with_gemini(prompt=prompt, temperature=temp, top_p=0.95)
+                last_quota_error = None
                 break
-            raise HTTPException(status_code=502, detail=f"Gemini call failed: {exc}") from exc
+            except NotImplementedError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except Exception as exc:
+                message = str(exc)
+                quota_like = ("429" in message) or ("RESOURCE_EXHAUSTED" in message)
+                if quota_like:
+                    last_quota_error = exc
+                    if retry_idx < max_retries and retry_sleep > 0:
+                        time.sleep(retry_sleep)
+                    continue
+                raise HTTPException(status_code=502, detail=f"Gemini call failed: {exc}") from exc
+
+        # Free-tier API keys can throttle quickly. If retries still fail,
+        # return best effort instead of failing the whole request.
+        if last_quota_error is not None:
+            if not candidate_pool:
+                fallback_text = payload.text
+                fallback_reward = compute_reward(
+                    source_text=payload.text,
+                    candidate=fallback_text,
+                    tgt=payload.tgt,
+                    clf=clf,
+                    lexicon_by_domain=lexicon_by_domain,
+                    w_domain=0.5,
+                    w_meaning=0.3,
+                    w_lex=0.2,
+                )
+                fallback = CandidateScore(
+                    text=fallback_text,
+                    total_score=fallback_reward.total,
+                    breakdown={
+                        "domain": fallback_reward.breakdown.domain,
+                        "meaning": fallback_reward.breakdown.meaning,
+                        "lex": fallback_reward.breakdown.lex,
+                    },
+                    temperature=temp,
+                )
+                candidate_pool[fallback.text] = fallback
+                used_fallback = True
+            break
 
         if not candidate.strip():
             candidate = payload.text
