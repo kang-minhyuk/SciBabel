@@ -31,10 +31,13 @@ def get_prompt_action_names() -> list[str]:
     return list(PROMPT_TEMPLATES.keys())
 
 
-def build_prompt(action: str, text: str, src: str, tgt: str) -> str:
+def build_prompt(action: str, text: str, src: str, tgt: str, term_instructions: str = "") -> str:
     if action not in PROMPT_TEMPLATES:
         raise ValueError(f"Unknown prompt action: {action}")
 
     src_name = DOMAIN_NAMES.get(src, src)
     tgt_name = DOMAIN_NAMES.get(tgt, tgt)
-    return PROMPT_TEMPLATES[action].format(src_name=src_name, tgt_name=tgt_name, text=text)
+    prompt = PROMPT_TEMPLATES[action].format(src_name=src_name, tgt_name=tgt_name, text=text)
+    if term_instructions.strip():
+        prompt = f"{prompt}\n\n{term_instructions.strip()}\n"
+    return prompt

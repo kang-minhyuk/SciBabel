@@ -1,0 +1,74 @@
+{
+  "loss function": {
+    "PM": "energy functional",
+    "CCE": "objective function"
+  },
+  "regularization": {
+    "PM": "stabilization term",
+    "CCE": "penalty term"
+  },
+  "gradient descent": {
+    "PM": "energy minimization",
+    "CCE": "iterative optimization"
+  },
+  "embedding": {
+    "PM": "state representation",
+    "CCE": "feature representation"
+  },
+  "band gap": {
+    "CSM": "spectral gap",
+    "CCE": "electronic band gap"
+  },
+  "activation energy": {
+    "CSM": "barrier height",
+    "PM": "energy barrier"
+  },
+  "reaction rate": {
+    "CSM": "transition rate",
+    "PM": "kinetic rate"
+  },
+  "diffusivity": {
+    "CSM": "diffusion coefficient",
+    "PM": "diffusion coefficient"
+  },
+  "entropy": {
+    "CSM": "information entropy",
+    "CCE": "thermodynamic entropy"
+  },
+  "free energy": {
+    "CSM": "objective potential",
+    "CCE": "gibbs free energy"
+  },
+  "transport": {
+    "CSM": "propagation",
+    "CCE": "mass transport"
+  },
+  "phase transition": {
+    "CSM": "regime shift",
+    "CCE": "phase change"
+  },
+  "stability": {
+    "CSM": "robustness",
+    "CCE": "process stability"
+  },
+  "calibration": {
+    "PM": "parameter fitting",
+    "CCE": "model calibration"
+  },
+  "generalization": {
+    "PM": "transferability",
+    "CCE": "cross-condition robustness"
+  },
+  "constraint": {
+    "PM": "conservation condition",
+    "CCE": "process constraint"
+  },
+  "graph": {
+    "PM": "interaction network",
+    "CCE": "reaction network"
+  },
+  "inference": {
+    "PM": "state estimation",
+    "CCE": "parameter estimation"
+  }
+}

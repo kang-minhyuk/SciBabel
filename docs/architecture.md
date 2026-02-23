@@ -35,6 +35,31 @@ Where:
 
 5. Return best output, score breakdown, and sorted candidates.
 
+## 2.1) Term strategy layer
+
+Before generation, backend builds key-term strategies in [backend/term_strategy.py](../backend/term_strategy.py):
+
+1. Extract 1-3 gram key terms from input text.
+2. Rank terms by lexicon membership and simple length/frequency heuristics.
+3. Compute target-domain native score from:
+   - direct/near lexicon membership,
+   - optional `term_stats.csv` log-odds.
+4. Classify each term into one of:
+   - `equivalent`: native in target community
+   - `analogous`: use conceptual neighbor in target domain
+   - `unique`: preserve term + short parenthetical explanation
+   - `intranslatable`: preserve term + mark as domain-specific concept
+
+Prompt gets a compact term-handling instruction block for top terms.
+
+During reranking, a small strategy penalty is applied if candidates violate policy:
+
+- missing `unique` term,
+- missing `analogous` neighbor,
+- replacing `intranslatable` term.
+
+`/translate` returns transparent `term_strategies` metadata.
+
 ## 3) Optional exploration policy
 
 [backend/bandit.py](../backend/bandit.py) implements in-memory epsilon-greedy action choice keyed by `src->tgt`.

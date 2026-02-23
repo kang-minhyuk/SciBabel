@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import csv
 from pathlib import Path
 from typing import Literal
 import hashlib
@@ -20,6 +21,12 @@ from gemini_client import generate_with_gemini
 from gpt_client import generate_with_gpt
 from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
+from term_strategy import (
+    TermStrategy,
+    TermStrategyEngine,
+    build_term_instruction_block,
+    strategy_penalty,
+)
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
 
@@ -28,6 +35,8 @@ Domain = Literal["CSM", "PM", "CCE"]
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = ROOT / "models" / "domain_clf.joblib"
 LEXICON_PATH = ROOT / "data" / "processed" / "domain_lexicon.json"
+TERM_STATS_PATH = ROOT / "data" / "processed" / "term_stats.csv"
+TERM_ALIASES_PATH = ROOT / "backend" / "term_aliases.json"
 
 
 def _get_cors_origins() -> list[str]:
@@ -61,6 +70,14 @@ class CandidateScore(BaseModel):
     temperature: float
 
 
+class TermStrategyItem(BaseModel):
+    term: str
+    type: str
+    native_score: float
+    neighbor: str | None = None
+    reason: str
+
+
 class TranslateResponse(BaseModel):
     best_candidate: str
     best_score: float
@@ -71,6 +88,7 @@ class TranslateResponse(BaseModel):
     num_attempted: int
     num_returned: int
     cache_hit: bool = False
+    term_strategies: list[TermStrategyItem] = Field(default_factory=list)
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
@@ -86,6 +104,8 @@ app.add_middleware(
 
 clf = None
 lexicon_by_domain: dict[str, list[str]] = {}
+term_log_odds: dict[tuple[str, str], float] = {}
+term_strategy_engine: TermStrategyEngine | None = None
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
 
@@ -100,7 +120,7 @@ def _generate_with_provider(prompt: str, temperature: float, top_p: float) -> st
 
 
 def _load_artifacts() -> None:
-    global clf, lexicon_by_domain
+    global clf, lexicon_by_domain, term_log_odds, term_strategy_engine
 
     if not MODEL_PATH.exists() or not LEXICON_PATH.exists():
         sample_corpus = ROOT / "data" / "processed" / "sample_corpus.jsonl"
@@ -149,6 +169,27 @@ def _load_artifacts() -> None:
     clf = joblib.load(MODEL_PATH)
     lexicon_by_domain = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
 
+    term_log_odds = {}
+    if TERM_STATS_PATH.exists():
+        with TERM_STATS_PATH.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                domain = row.get("domain", "")
+                term = row.get("term", "")
+                if not domain or not term:
+                    continue
+                try:
+                    score = float(row.get("log_odds", "0") or 0)
+                except ValueError:
+                    score = 0.0
+                term_log_odds[(domain, term.lower())] = score
+
+    term_strategy_engine = TermStrategyEngine(
+        lexicon_by_domain=lexicon_by_domain,
+        aliases_path=TERM_ALIASES_PATH,
+        term_log_odds=term_log_odds,
+    )
+
 
 def _normalize_text(text: str, max_chars: int) -> str:
     cleaned = " ".join(text.strip().split())
@@ -178,9 +219,14 @@ def health() -> dict[str, str]:
 
 @app.post("/translate", response_model=TranslateResponse)
 def translate(payload: TranslateRequest) -> TranslateResponse:
-    global clf, lexicon_by_domain
+    global clf, lexicon_by_domain, term_strategy_engine
 
     if clf is None or not lexicon_by_domain:
+        try:
+            _load_artifacts()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if term_strategy_engine is None:
         try:
             _load_artifacts()
         except Exception as exc:
@@ -230,15 +276,28 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         if (time.time() - cached_ts) <= cache_ttl_sec:
             return cached_resp.model_copy(update={"cache_hit": True})
 
+    key_terms = term_strategy_engine.extract_key_terms(normalized_text, max_terms=10)
+    strategies: list[TermStrategy] = [
+        term_strategy_engine.classify_term(kt.term, payload.tgt) for kt in key_terms
+    ]
+    term_instruction_block = build_term_instruction_block(strategies, max_terms=8)
+
     route_key = f"{payload.src}->{payload.tgt}"
     action = bandit.choose(route_key)
-    prompt = build_prompt(action=action, text=normalized_text, src=payload.src, tgt=payload.tgt)
+    prompt = build_prompt(
+        action=action,
+        text=normalized_text,
+        src=payload.src,
+        tgt=payload.tgt,
+        term_instructions=term_instruction_block,
+    )
 
     total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "16"))
     total_runs = max(payload.k, total_runs_env)
     inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
     max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "2")))
     retry_sleep = float(os.getenv("GEMINI_RETRY_SLEEP_SEC", "1.5"))
+    strategy_penalty_weight = float(os.getenv("STRATEGY_PENALTY_WEIGHT", "0.15"))
 
     candidate_pool: dict[str, CandidateScore] = {}
     used_fallback = False
@@ -308,14 +367,17 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             w_meaning=0.3,
             w_lex=0.2,
         )
+        strat_pen = strategy_penalty(candidate, strategies)
+        final_score = reward.total - (strategy_penalty_weight * strat_pen)
 
         scored_candidate = CandidateScore(
             text=candidate,
-            total_score=reward.total,
+            total_score=final_score,
             breakdown={
                 "domain": reward.breakdown.domain,
                 "meaning": reward.breakdown.meaning,
                 "lex": reward.breakdown.lex,
+                "strategy_penalty": strat_pen,
             },
             temperature=temp,
         )
@@ -353,6 +415,16 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         num_attempted=num_attempted,
         num_returned=len(scored),
         cache_hit=False,
+        term_strategies=[
+            TermStrategyItem(
+                term=s.term,
+                type=s.type,
+                native_score=s.native_score,
+                neighbor=s.neighbor,
+                reason=s.reason,
+            )
+            for s in strategies
+        ],
     )
     if cache_ttl_sec > 0:
         _response_cache[request_key] = (time.time(), response)
