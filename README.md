@@ -59,6 +59,7 @@ Train domain classifier:
 - Set `GEMINI_API_KEY` in `.env` to enable live generation.
 - If Gemini is not configured, `/translate` returns a clear error.
 - Bandit prompt selection is in-memory for MVP.
+- GitHub Actions CI runs backend checks + sample artifact build + frontend build on push/PR to `main`.
 
 ## Deploy (website-first)
 
