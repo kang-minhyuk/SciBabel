@@ -349,7 +349,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     if not semantic_enabled:
         min_semantic_sim = min(
             min_semantic_sim,
-            float(os.getenv("MIN_SEMANTIC_SIM_FALLBACK", "0.45")),
+            float(os.getenv("MIN_SEMANTIC_SIM_FALLBACK", "0.55")),
         )
     alpha_lex = float(os.getenv("ALPHA_LEX", "0.35"))
     beta_copy = float(os.getenv("BETA_COPY", "0.5"))
