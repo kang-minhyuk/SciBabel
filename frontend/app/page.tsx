@@ -21,6 +21,9 @@ type TranslateResponse = {
   score_breakdown: { domain: number; meaning: number; lex: number };
   candidates: Candidate[];
   prompt_action: string;
+  used_fallback: boolean;
+  num_attempted: number;
+  num_returned: number;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -135,6 +138,20 @@ export default function HomePage() {
       {result && (
         <section className="mt-6 rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
           <h2 className="text-xl font-semibold">Best output</h2>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">
+              attempted runs: {result.num_attempted}
+            </span>
+            <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">
+              returned candidates: {result.num_returned}
+            </span>
+            {result.used_fallback && (
+              <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-800">
+                partial result (quota fallback)
+              </span>
+            )}
+          </div>
+
           <p className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-sm">
             {result.best_candidate}
           </p>

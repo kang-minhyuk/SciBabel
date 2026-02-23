@@ -54,6 +54,9 @@ class TranslateResponse(BaseModel):
     score_breakdown: dict[str, float]
     candidates: list[CandidateScore]
     prompt_action: str
+    used_fallback: bool
+    num_attempted: int
+    num_returned: int
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
@@ -119,8 +122,11 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
 
     candidate_pool: dict[str, CandidateScore] = {}
+    used_fallback = False
+    num_attempted = 0
     for i in range(total_runs):
         temp = _temperature_for_step(i, total_runs)
+        num_attempted += 1
         try:
             candidate = generate_with_gemini(prompt=prompt, temperature=temp, top_p=0.95)
         except NotImplementedError as exc:
@@ -154,11 +160,13 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                         temperature=temp,
                     )
                     candidate_pool[fallback.text] = fallback
+                    used_fallback = True
                 break
             raise HTTPException(status_code=502, detail=f"Gemini call failed: {exc}") from exc
 
         if not candidate.strip():
             candidate = payload.text
+            used_fallback = True
 
         reward = compute_reward(
             source_text=payload.text,
@@ -211,6 +219,9 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         score_breakdown=best.breakdown,
         candidates=scored,
         prompt_action=action,
+        used_fallback=used_fallback,
+        num_attempted=num_attempted,
+        num_returned=len(scored),
     )
 
 
