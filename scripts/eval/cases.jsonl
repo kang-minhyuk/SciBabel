@@ -1,0 +1,48 @@
+{"id":"csm_pm_001","src":"CSM","tgt":"PM","text":"Our transformer uses sparse attention to reduce memory while preserving long-range dependencies."}
+{"id":"csm_pm_002","src":"CSM","tgt":"PM","text":"The optimization converges in O(n log n) with a provable approximation guarantee."}
+{"id":"csm_pm_003","src":"CSM","tgt":"PM","text":"We calibrate uncertainty with conformal prediction under distribution shift."}
+{"id":"csm_pm_004","src":"CSM","tgt":"PM","text":"The latent manifold is regularized with a graph Laplacian to preserve neighborhood structure."}
+{"id":"csm_pm_005","src":"CSM","tgt":"PM","text":"A sparse preconditioner reduces solver iterations for large linear systems."}
+{"id":"csm_pm_006","src":"CSM","tgt":"PM","text":"We enforce SE(3)-equivariance in an orbital message-passing network and reconstruct periodic materials with an inverse Fourier transform."}
+{"id":"csm_pm_007","src":"CSM","tgt":"PM","text":"The policy is trained with off-policy corrections and clipped importance weights."}
+{"id":"csm_pm_008","src":"CSM","tgt":"PM","text":"Batch normalization stabilizes gradients during mixed-precision training."}
+{"id":"pm_csm_001","src":"PM","tgt":"CSM","text":"Phonon scattering limits thermal conductivity in the high-temperature regime."}
+{"id":"pm_csm_002","src":"PM","tgt":"CSM","text":"The Hamiltonian includes spin-orbit coupling and crystal-field splitting."}
+{"id":"pm_csm_003","src":"PM","tgt":"CSM","text":"Carrier mobility is estimated from Hall measurements across doping levels."}
+{"id":"pm_csm_004","src":"PM","tgt":"CSM","text":"A finite-element model predicts crack initiation near stress concentrators."}
+{"id":"pm_csm_005","src":"PM","tgt":"CSM","text":"The dispersion relation reveals anisotropic group velocity near the band edge."}
+{"id":"pm_csm_006","src":"PM","tgt":"CSM","text":"The Monte Carlo simulation reproduces magnetization hysteresis under cyclic loading."}
+{"id":"pm_csm_007","src":"PM","tgt":"CSM","text":"We fit a diffusion model to neutron scattering spectra at low temperature."}
+{"id":"pm_csm_008","src":"PM","tgt":"CSM","text":"The dielectric response exhibits a resonance peak due to collective oscillations."}
+{"id":"csm_cce_001","src":"CSM","tgt":"CCE","text":"Our transformer uses sparse attention to reduce memory while preserving long-range dependencies."}
+{"id":"csm_cce_002","src":"CSM","tgt":"CCE","text":"The optimization converges in O(n log n) with a provable approximation guarantee."}
+{"id":"csm_cce_003","src":"CSM","tgt":"CCE","text":"We solve a constrained planning problem with model-predictive control."}
+{"id":"csm_cce_004","src":"CSM","tgt":"CCE","text":"A Bayesian optimizer searches process parameters with expected improvement."}
+{"id":"csm_cce_005","src":"CSM","tgt":"CCE","text":"The classifier detects rare fault states from multivariate sensor streams."}
+{"id":"csm_cce_006","src":"CSM","tgt":"CCE","text":"Graph regularization improves robustness to missing telemetry channels."}
+{"id":"csm_cce_007","src":"CSM","tgt":"CCE","text":"A surrogate model approximates expensive simulations for rapid screening."}
+{"id":"csm_cce_008","src":"CSM","tgt":"CCE","text":"We use domain adaptation to transfer controllers across plant configurations."}
+{"id":"cce_csm_001","src":"CCE","tgt":"CSM","text":"Catalyst deactivation is mitigated by controlling residence time and reactant partial pressure."}
+{"id":"cce_csm_002","src":"CCE","tgt":"CSM","text":"Mass transfer limitations dominate at high conversion because of pore diffusion resistance."}
+{"id":"cce_csm_003","src":"CCE","tgt":"CSM","text":"Selectivity improves with staged feed injection and temperature ramping."}
+{"id":"cce_csm_004","src":"CCE","tgt":"CSM","text":"The reactor network model enforces material and energy balances at steady state."}
+{"id":"cce_csm_005","src":"CCE","tgt":"CSM","text":"We estimate kinetic parameters from batch experiments using nonlinear regression."}
+{"id":"cce_csm_006","src":"CCE","tgt":"CSM","text":"A distillation column exhibits tray flooding near high vapor load."}
+{"id":"cce_csm_007","src":"CCE","tgt":"CSM","text":"The adsorption isotherm follows Langmuir behavior over the tested concentration range."}
+{"id":"cce_csm_008","src":"CCE","tgt":"CSM","text":"Process safety constraints cap pressure rise during runaway scenarios."}
+{"id":"pm_cce_001","src":"PM","tgt":"CCE","text":"Phonon scattering limits thermal conductivity in the high-temperature regime."}
+{"id":"pm_cce_002","src":"PM","tgt":"CCE","text":"The stress intensity factor exceeds the fracture toughness at the notch tip."}
+{"id":"pm_cce_003","src":"PM","tgt":"CCE","text":"A diffusion-reaction model captures concentration gradients near the interface."}
+{"id":"pm_cce_004","src":"PM","tgt":"CCE","text":"Band alignment controls carrier injection at the heterojunction."}
+{"id":"pm_cce_005","src":"PM","tgt":"CCE","text":"The phase diagram shows a metastable region under rapid cooling."}
+{"id":"pm_cce_006","src":"PM","tgt":"CCE","text":"Finite-rate heat transfer causes delayed thermal equilibration."}
+{"id":"pm_cce_007","src":"PM","tgt":"CCE","text":"The permeability tensor indicates anisotropic transport through the membrane."}
+{"id":"pm_cce_008","src":"PM","tgt":"CCE","text":"Neutron diffraction confirms lattice expansion with increasing hydrogen content."}
+{"id":"cce_pm_001","src":"CCE","tgt":"PM","text":"Catalyst deactivation is mitigated by controlling residence time and reactant partial pressure."}
+{"id":"cce_pm_002","src":"CCE","tgt":"PM","text":"Mass transfer limitations dominate at high conversion because of pore diffusion resistance."}
+{"id":"cce_pm_003","src":"CCE","tgt":"PM","text":"The reactor achieves higher selectivity through staged feed and temperature ramping."}
+{"id":"cce_pm_004","src":"CCE","tgt":"PM","text":"A packed-bed model predicts axial temperature gradients during exothermic operation."}
+{"id":"cce_pm_005","src":"CCE","tgt":"PM","text":"Vapor-liquid equilibrium shifts with pressure in multicomponent mixtures."}
+{"id":"cce_pm_006","src":"CCE","tgt":"PM","text":"Catalyst pellets show intraparticle diffusion limits at high throughput."}
+{"id":"cce_pm_007","src":"CCE","tgt":"PM","text":"The ignition-extinction curve exhibits hysteresis under changing feed composition."}
+{"id":"cce_pm_008","src":"CCE","tgt":"PM","text":"Residence-time distribution broadening indicates non-ideal mixing in the vessel."}

@@ -3,7 +3,7 @@ ROOT := $(PWD)
 BACKEND := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend
 
-.PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test
+.PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test eval autotune diagnose
 
 setup:
 	python3 -m pip install --upgrade pip
@@ -32,3 +32,15 @@ train-sample:
 test:
 	python3 -m py_compile backend/*.py scripts/*.py
 	@echo "Basic syntax checks passed"
+
+eval:
+	python3 scripts/eval/run_eval.py --api-base http://localhost:8000 --k 4
+	@LOG=$$(ls -t logs/translation_eval_*.jsonl | head -1); \
+	python3 scripts/eval/analyze_eval.py --input $$LOG
+
+autotune:
+	@LOG=$$(ls -t logs/translation_eval_*.jsonl | head -1); \
+	python3 scripts/eval/autotune_reranker.py --input $$LOG
+
+diagnose: eval autotune
+	@echo "Diagnosis complete. See reports/diagnosis_*.md and reports/autotune_*.md"

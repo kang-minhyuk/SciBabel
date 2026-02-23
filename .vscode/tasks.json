@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SciBabel: Run Backend",
+      "type": "shell",
+      "command": "cd ${workspaceFolder}/backend && python3.11 -m uvicorn app:app --reload --host 0.0.0.0 --port 8000",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "SciBabel: Run Eval",
+      "type": "shell",
+      "command": "cd ${workspaceFolder} && make eval",
+      "problemMatcher": []
+    },
+    {
+      "label": "SciBabel: Diagnose",
+      "type": "shell",
+      "command": "cd ${workspaceFolder} && make diagnose",
+      "problemMatcher": []
+    }
+  ]
+}
