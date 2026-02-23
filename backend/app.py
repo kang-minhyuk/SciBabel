@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -29,7 +30,7 @@ class TranslateRequest(BaseModel):
     text: str = Field(min_length=3)
     src: Domain
     tgt: Domain
-    k: int = Field(default=4, ge=2, le=8)
+    k: int = Field(default=2, ge=2, le=8)
 
 
 class CandidateScore(BaseModel):
@@ -106,18 +107,49 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     prompt = build_prompt(action=action, text=payload.text, src=payload.src, tgt=payload.tgt)
 
     temperatures = [0.2 + (i * 0.2) for i in range(payload.k)]
+    inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
 
     scored: list[CandidateScore] = []
-    for temp in temperatures:
+    for i, temp in enumerate(temperatures):
         try:
             candidate = generate_with_gemini(prompt=prompt, temperature=temp, top_p=0.95)
         except NotImplementedError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
+            message = str(exc)
+            quota_like = ("429" in message) or ("RESOURCE_EXHAUSTED" in message)
+            # Free-tier API keys can throttle quickly. If we already have
+            # candidates, return best effort instead of failing the whole request.
+            if quota_like:
+                if not scored:
+                    fallback_text = payload.text
+                    fallback_reward = compute_reward(
+                        source_text=payload.text,
+                        candidate=fallback_text,
+                        tgt=payload.tgt,
+                        clf=clf,
+                        lexicon_by_domain=lexicon_by_domain,
+                        w_domain=0.5,
+                        w_meaning=0.3,
+                        w_lex=0.2,
+                    )
+                    scored.append(
+                        CandidateScore(
+                            text=fallback_text,
+                            total_score=fallback_reward.total,
+                            breakdown={
+                                "domain": fallback_reward.breakdown.domain,
+                                "meaning": fallback_reward.breakdown.meaning,
+                                "lex": fallback_reward.breakdown.lex,
+                            },
+                            temperature=temp,
+                        )
+                    )
+                break
             raise HTTPException(status_code=502, detail=f"Gemini call failed: {exc}") from exc
 
         if not candidate.strip():
-            candidate = ""
+            candidate = payload.text
 
         reward = compute_reward(
             source_text=payload.text,
@@ -141,6 +173,16 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 },
                 temperature=temp,
             )
+        )
+
+        # Avoid bursty requests on free-tier quotas.
+        if i < len(temperatures) - 1 and inter_call_sleep > 0:
+            time.sleep(inter_call_sleep)
+
+    if not scored:
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini did not return any candidate. Try again with k=2 or wait for quota reset.",
         )
 
     scored.sort(key=lambda c: c.total_score, reverse=True)

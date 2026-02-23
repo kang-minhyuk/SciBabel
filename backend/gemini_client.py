@@ -5,8 +5,8 @@ import os
 import requests
 
 DEFAULT_GEMINI_MODELS = [
-    "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-2.0-flash",
 ]
 
 
@@ -42,17 +42,15 @@ def generate_with_gemini(prompt: str, temperature: float, top_p: float) -> str:
             f"{model}:generateContent?key={api_key}"
         )
         response = requests.post(url, json=payload, timeout=45)
-        if response.status_code == 404 and not configured_model:
-            # Try next default model if endpoint/model combo is unavailable.
-            continue
         try:
             response.raise_for_status()
             data = response.json()
             break
         except Exception as exc:
             last_error = exc
-            if configured_model:
-                raise
+            if not configured_model:
+                continue
+            raise
 
     if not data and last_error is not None:
         raise last_error

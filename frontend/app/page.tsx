@@ -31,7 +31,7 @@ export default function HomePage() {
   );
   const [src, setSrc] = useState<Domain>("CSM");
   const [tgt, setTgt] = useState<Domain>("PM");
-  const [k, setK] = useState(4);
+  const [k, setK] = useState(2);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
