@@ -34,7 +34,7 @@ export default function HomePage() {
   );
   const [src, setSrc] = useState<Domain>("CSM");
   const [tgt, setTgt] = useState<Domain>("PM");
-  const [k, setK] = useState(1);
+  const [k, setK] = useState(2);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,7 +115,7 @@ export default function HomePage() {
             <label className="mb-1 block text-sm font-medium">Candidates (k): {k}</label>
             <input
               type="range"
-              min={1}
+              min={2}
               max={8}
               value={k}
               onChange={(e) => setK(Number(e.target.value))}
