@@ -33,6 +33,14 @@ class TranslateRequest(BaseModel):
     k: int = Field(default=2, ge=2, le=8)
 
 
+def _temperature_for_step(step: int, total_steps: int) -> float:
+    if total_steps <= 1:
+        return 0.2
+    # Sweep temperature from low to moderate across iterative calls.
+    value = 0.2 + (0.7 * (step / (total_steps - 1)))
+    return round(min(max(value, 0.2), 1.0), 2)
+
+
 class CandidateScore(BaseModel):
     text: str
     total_score: float
@@ -106,11 +114,13 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     action = bandit.choose(route_key)
     prompt = build_prompt(action=action, text=payload.text, src=payload.src, tgt=payload.tgt)
 
-    temperatures = [0.2 + (i * 0.2) for i in range(payload.k)]
+    total_runs_env = int(os.getenv("GEMINI_TOTAL_RUNS", "16"))
+    total_runs = max(payload.k, total_runs_env)
     inter_call_sleep = float(os.getenv("GEMINI_INTER_CALL_SLEEP_SEC", "0.6"))
 
-    scored: list[CandidateScore] = []
-    for i, temp in enumerate(temperatures):
+    candidate_pool: dict[str, CandidateScore] = {}
+    for i in range(total_runs):
+        temp = _temperature_for_step(i, total_runs)
         try:
             candidate = generate_with_gemini(prompt=prompt, temperature=temp, top_p=0.95)
         except NotImplementedError as exc:
@@ -121,7 +131,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             # Free-tier API keys can throttle quickly. If we already have
             # candidates, return best effort instead of failing the whole request.
             if quota_like:
-                if not scored:
+                if not candidate_pool:
                     fallback_text = payload.text
                     fallback_reward = compute_reward(
                         source_text=payload.text,
@@ -133,18 +143,17 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                         w_meaning=0.3,
                         w_lex=0.2,
                     )
-                    scored.append(
-                        CandidateScore(
-                            text=fallback_text,
-                            total_score=fallback_reward.total,
-                            breakdown={
-                                "domain": fallback_reward.breakdown.domain,
-                                "meaning": fallback_reward.breakdown.meaning,
-                                "lex": fallback_reward.breakdown.lex,
-                            },
-                            temperature=temp,
-                        )
+                    fallback = CandidateScore(
+                        text=fallback_text,
+                        total_score=fallback_reward.total,
+                        breakdown={
+                            "domain": fallback_reward.breakdown.domain,
+                            "meaning": fallback_reward.breakdown.meaning,
+                            "lex": fallback_reward.breakdown.lex,
+                        },
+                        temperature=temp,
                     )
+                    candidate_pool[fallback.text] = fallback
                 break
             raise HTTPException(status_code=502, detail=f"Gemini call failed: {exc}") from exc
 
@@ -162,30 +171,37 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             w_lex=0.2,
         )
 
-        scored.append(
-            CandidateScore(
-                text=candidate,
-                total_score=reward.total,
-                breakdown={
-                    "domain": reward.breakdown.domain,
-                    "meaning": reward.breakdown.meaning,
-                    "lex": reward.breakdown.lex,
-                },
-                temperature=temp,
-            )
+        scored_candidate = CandidateScore(
+            text=candidate,
+            total_score=reward.total,
+            breakdown={
+                "domain": reward.breakdown.domain,
+                "meaning": reward.breakdown.meaning,
+                "lex": reward.breakdown.lex,
+            },
+            temperature=temp,
         )
 
+        existing = candidate_pool.get(scored_candidate.text)
+        if existing is None or scored_candidate.total_score > existing.total_score:
+            candidate_pool[scored_candidate.text] = scored_candidate
+
+        # Keep only top-k candidates while iterating many calls.
+        top_k = sorted(candidate_pool.values(), key=lambda c: c.total_score, reverse=True)[: payload.k]
+        candidate_pool = {c.text: c for c in top_k}
+
         # Avoid bursty requests on free-tier quotas.
-        if i < len(temperatures) - 1 and inter_call_sleep > 0:
+        if i < total_runs - 1 and inter_call_sleep > 0:
             time.sleep(inter_call_sleep)
+
+    scored = sorted(candidate_pool.values(), key=lambda c: c.total_score, reverse=True)
 
     if not scored:
         raise HTTPException(
             status_code=502,
-            detail="Gemini did not return any candidate. Try again with k=2 or wait for quota reset.",
+            detail="Gemini did not return any candidate. Try again later or reduce GEMINI_TOTAL_RUNS.",
         )
 
-    scored.sort(key=lambda c: c.total_score, reverse=True)
     best = scored[0]
     bandit.update(route_key, action, best.total_score)
 
