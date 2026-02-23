@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from bandit import EpsilonGreedyBandit
 from gemini_client import generate_with_gemini
+from gpt_client import generate_with_gpt
 from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
 
@@ -87,6 +88,15 @@ clf = None
 lexicon_by_domain: dict[str, list[str]] = {}
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
+
+
+def _generate_with_provider(prompt: str, temperature: float, top_p: float) -> str:
+    provider = os.getenv("LLM_PROVIDER", "gpt").strip().lower()
+    if provider in {"gpt", "openai"}:
+        return generate_with_gpt(prompt=prompt, temperature=temperature, top_p=top_p)
+    if provider == "gemini":
+        return generate_with_gemini(prompt=prompt, temperature=temperature, top_p=top_p)
+    raise ValueError("Unsupported LLM_PROVIDER. Use 'gpt' or 'gemini'.")
 
 
 def _load_artifacts() -> None:
@@ -240,7 +250,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         last_quota_error: Exception | None = None
         for retry_idx in range(max_retries + 1):
             try:
-                candidate = generate_with_gemini(prompt=prompt, temperature=temp, top_p=0.95)
+                candidate = _generate_with_provider(prompt=prompt, temperature=temp, top_p=0.95)
                 last_quota_error = None
                 break
             except NotImplementedError as exc:

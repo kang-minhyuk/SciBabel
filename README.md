@@ -56,6 +56,7 @@ Train domain classifier:
 
 ## Notes
 
+- LLM provider is configurable via `LLM_PROVIDER` (`gpt` default, `gemini` optional).
 - Set `GEMINI_API_KEY` in `.env` to enable live generation.
 - If Gemini is not configured, `/translate` returns a clear error.
 - Bandit prompt selection is in-memory for MVP.

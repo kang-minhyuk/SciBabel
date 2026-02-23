@@ -31,6 +31,16 @@ Set `GEMINI_API_KEY` in `.env` at repo root.
 
 If not set, translation call returns a descriptive runtime error.
 
+## LLM provider config
+
+Backend supports provider switch via `LLM_PROVIDER`:
+
+- `LLM_PROVIDER=gpt` (default)
+  - requires `OPENAI_API_KEY`
+  - optional `OPENAI_MODEL` (default `gpt-4.1-mini`)
+- `LLM_PROVIDER=gemini`
+  - requires `GEMINI_API_KEY`
+
 ## Deployment notes
 
 ### Required env vars
