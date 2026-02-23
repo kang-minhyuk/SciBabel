@@ -67,7 +67,7 @@ Train domain classifier:
 
 - Import this GitHub repo into Vercel.
 - Set project root to `frontend/`.
-- Add env var: `NEXT_PUBLIC_API_BASE_URL=https://<your-backend-domain>`.
+- Add env var: `NEXT_PUBLIC_API_BASE_URL=https://scibabel.onrender.com`.
 
 ### Backend (Render)
 
@@ -79,5 +79,5 @@ Train domain classifier:
 Backend env vars:
 
 - `GEMINI_API_KEY=<your-key>`
-- `BACKEND_CORS_ORIGINS=https://<your-frontend-domain>`
+- `BACKEND_CORS_ORIGINS=https://sci-babel.vercel.app`
 - Optional: `GEMINI_TOTAL_RUNS=16`, `GEMINI_INTER_CALL_SLEEP_SEC=0.6`

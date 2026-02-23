@@ -9,7 +9,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: BACKEND_CORS_ORIGINS
-        value: https://your-frontend-domain.vercel.app
+        value: https://sci-babel.vercel.app
       - key: GEMINI_TOTAL_RUNS
         value: "16"
       - key: GEMINI_INTER_CALL_SLEEP_SEC

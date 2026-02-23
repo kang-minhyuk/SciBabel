@@ -36,7 +36,7 @@ If not set, translation call returns a descriptive runtime error.
 ### Required env vars
 
 - `GEMINI_API_KEY`
-- `BACKEND_CORS_ORIGINS` (comma-separated; example: `https://your-frontend.vercel.app`)
+- `BACKEND_CORS_ORIGINS` (comma-separated; example: `https://sci-babel.vercel.app`)
 
 ### Optional env vars
 
