@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-_/]*")
+SPECIAL_TERM_PATTERNS = [
+    re.compile(r"SE\(3\)-equivariant", re.IGNORECASE),
+    re.compile(r"SE\(3\)", re.IGNORECASE),
+    re.compile(r"inverse Fourier transform", re.IGNORECASE),
+    re.compile(r"Fourier", re.IGNORECASE),
+    re.compile(r"\bDFT\b", re.IGNORECASE),
+]
 FORMAL_KEYWORDS = {
     "sigma-algebra",
     "lebesgue",
@@ -102,7 +109,7 @@ class TermStrategyEngine:
 
     def extract_key_terms(self, text: str, max_terms: int = 10) -> list[KeyTerm]:
         matches = list(TOKEN_RE.finditer(text))
-        if not matches:
+        if not matches and not any(p.search(text) for p in SPECIAL_TERM_PATTERNS):
             return []
 
         # Build n-grams from token matches (1-3 grams).
@@ -130,7 +137,24 @@ class TermStrategyEngine:
                     candidates[norm] = (score, (start, end))
 
         ranked = sorted(candidates.items(), key=lambda x: x[1][0], reverse=True)[:max_terms]
-        return [KeyTerm(term=t, span=s[1]) for t, s in ranked]
+        out = [KeyTerm(term=t, span=s[1]) for t, s in ranked]
+
+        # Pattern-driven key terms (formal or symbolic concepts).
+        existing = {normalize_term(k.term) for k in out}
+        for patt in SPECIAL_TERM_PATTERNS:
+            m = patt.search(text)
+            if not m:
+                continue
+            raw = text[m.start() : m.end()]
+            norm = normalize_term(raw)
+            if norm in existing:
+                continue
+            out.append(KeyTerm(term=norm, span=(m.start(), m.end())))
+            existing.add(norm)
+            if len(out) >= max_terms:
+                break
+
+        return out[:max_terms]
 
     def term_native_score(self, term: str, tgt: str) -> float:
         norm = normalize_term(term)

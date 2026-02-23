@@ -11,19 +11,46 @@ type Candidate = {
     domain: number;
     meaning: number;
     lex: number;
+    semantic_sim?: number;
+    copy_score?: number;
+    copy_penalty?: number;
+    strategy_penalty?: number;
   };
   temperature: number;
+  action: string;
+  lex_terms_hit: string[];
+};
+
+type TermStrategyItem = {
+  term: string;
+  type: string;
+  native_score: number;
+  neighbor?: string | null;
+  reason: string;
 };
 
 type TranslateResponse = {
   best_candidate: string;
   best_score: number;
-  score_breakdown: { domain: number; meaning: number; lex: number };
+  score_breakdown: {
+    domain: number;
+    meaning: number;
+    lex: number;
+    semantic_sim?: number;
+    copy_score?: number;
+    copy_penalty?: number;
+    strategy_penalty?: number;
+  };
   candidates: Candidate[];
   prompt_action: string;
   used_fallback: boolean;
   num_attempted: number;
   num_returned: number;
+  src_warning: boolean;
+  predicted_src?: string | null;
+  predicted_src_confidence?: number | null;
+  prompt_actions_used: string[];
+  term_strategies: TermStrategyItem[];
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -164,19 +191,63 @@ export default function HomePage() {
               <span className="font-medium">Breakdown:</span> domain {result.score_breakdown.domain.toFixed(4)}
               , meaning {result.score_breakdown.meaning.toFixed(4)}, lex {result.score_breakdown.lex.toFixed(4)}
             </p>
+            {typeof result.score_breakdown.semantic_sim === "number" && (
+              <p>
+                <span className="font-medium">Semantic sim:</span>{" "}
+                {result.score_breakdown.semantic_sim.toFixed(4)}
+                {typeof result.score_breakdown.copy_score === "number" && (
+                  <>
+                    {" "}• <span className="font-medium">Copy score:</span>{" "}
+                    {result.score_breakdown.copy_score.toFixed(4)}
+                  </>
+                )}
+              </p>
+            )}
             <p>
               <span className="font-medium">Prompt action:</span> {result.prompt_action}
             </p>
+            {result.prompt_actions_used?.length > 0 && (
+              <p>
+                <span className="font-medium">Actions used:</span> {result.prompt_actions_used.join(", ")}
+              </p>
+            )}
           </div>
+
+          {result.src_warning && (
+            <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+              Source-domain mismatch warning: input looks closer to {result.predicted_src}
+              {typeof result.predicted_src_confidence === "number" &&
+                ` (${(result.predicted_src_confidence * 100).toFixed(1)}%)`}
+              .
+            </div>
+          )}
+
+          {result.term_strategies?.length > 0 && (
+            <details className="mt-3 rounded-lg border border-slate-200 p-3 text-sm">
+              <summary className="cursor-pointer font-medium">Term strategies</summary>
+              <ul className="mt-2 space-y-1 text-slate-700">
+                {result.term_strategies.map((s, i) => (
+                  <li key={`${s.term}-${i}`}>
+                    <span className="font-medium">{s.term}</span> → {s.type}
+                    {s.neighbor ? ` (neighbor: ${s.neighbor})` : ""} — {s.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
 
           <h3 className="mt-4 text-lg font-semibold">Top candidates</h3>
           <ol className="mt-2 space-y-2">
             {result.candidates.map((c, idx) => (
               <li key={`${idx}-${c.temperature}`} className="rounded-lg border border-slate-200 p-3 text-sm">
                 <div className="mb-1 text-xs text-slate-500">
-                  rank #{idx + 1} • total {c.total_score.toFixed(4)} • temp {c.temperature.toFixed(1)}
+                  rank #{idx + 1} • total {c.total_score.toFixed(4)} • temp {c.temperature.toFixed(1)} • action {c.action}
                 </div>
                 <p className="whitespace-pre-wrap">{c.text}</p>
+                <div className="mt-1 text-xs text-slate-600">
+                  semantic {c.breakdown.semantic_sim?.toFixed(4) ?? "-"} • copy {c.breakdown.copy_score?.toFixed(4) ?? "-"}
+                  {c.lex_terms_hit?.length ? ` • lex terms: ${c.lex_terms_hit.join(", ")}` : ""}
+                </div>
               </li>
             ))}
           </ol>

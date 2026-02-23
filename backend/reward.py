@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-_/]*")
@@ -13,12 +13,18 @@ class ScoreBreakdown:
     domain: float
     meaning: float
     lex: float
+    semantic_sim: float
+    copy_score: float
+    copy_penalty: float
+    lex_terms_hit: list[str]
 
 
 @dataclass
 class RewardResult:
     total: float
     breakdown: ScoreBreakdown
+    eligible: bool
+    discard_reason: str | None = None
 
 
 def tokenize(text: str) -> set[str]:
@@ -33,6 +39,30 @@ def jaccard_overlap(text_a: str, text_b: str) -> float:
     return len(a & b) / len(a | b)
 
 
+def rouge_l_copy_score(source_text: str, candidate: str) -> float:
+    """Approximate copy score via ROUGE-L F1 over token sequence."""
+    src = [t.lower() for t in TOKEN_RE.findall(source_text)]
+    cand = [t.lower() for t in TOKEN_RE.findall(candidate)]
+    if not src or not cand:
+        return 0.0
+
+    # LCS dynamic programming
+    dp = [[0] * (len(cand) + 1) for _ in range(len(src) + 1)]
+    for i in range(1, len(src) + 1):
+        for j in range(1, len(cand) + 1):
+            if src[i - 1] == cand[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+
+    lcs = dp[-1][-1]
+    precision = lcs / len(cand)
+    recall = lcs / len(src)
+    if precision + recall == 0:
+        return 0.0
+    return float((2 * precision * recall) / (precision + recall))
+
+
 def lexicon_coverage(candidate: str, tgt_lexicon: list[str]) -> float:
     cand_tokens = tokenize(candidate)
     if not tgt_lexicon:
@@ -41,6 +71,34 @@ def lexicon_coverage(candidate: str, tgt_lexicon: list[str]) -> float:
     normalized_lex = {term.lower() for term in tgt_lexicon}
     hits = len(cand_tokens & normalized_lex)
     return hits / max(1, len(normalized_lex))
+
+
+def lex_weighted_evidence(
+    candidate: str,
+    tgt: str,
+    term_log_odds: dict[tuple[str, str], float] | None,
+    tgt_lexicon: list[str],
+) -> tuple[float, list[str]]:
+    """Weighted lexical evidence from term log-odds, fallback to coverage."""
+    text = candidate.lower()
+
+    if not term_log_odds:
+        return lexicon_coverage(candidate, tgt_lexicon), []
+
+    contributions: list[tuple[str, float]] = []
+    for (domain, term), score in term_log_odds.items():
+        if domain != tgt:
+            continue
+        if term and term in text and score > 0:
+            contributions.append((term, float(score)))
+
+    if not contributions:
+        return lexicon_coverage(candidate, tgt_lexicon), []
+
+    contributions.sort(key=lambda x: x[1], reverse=True)
+    lex_score = sum(v for _, v in contributions)
+    lex_terms = [f"{t}:{v:.2f}" for t, v in contributions[:8]]
+    return float(lex_score), lex_terms
 
 
 def domain_probability(candidate: str, tgt: str, clf: Any) -> float:
@@ -59,13 +117,42 @@ def compute_reward(
     tgt: str,
     clf: Any,
     lexicon_by_domain: dict[str, list[str]],
-    w_domain: float = 0.5,
-    w_meaning: float = 0.3,
-    w_lex: float = 0.2,
+    semantic_similarity_fn: Callable[[str, str], float],
+    term_log_odds: dict[tuple[str, str], float] | None = None,
+    min_semantic_sim: float = 0.78,
+    alpha_lex: float = 0.35,
+    beta_copy: float = 0.5,
+    copy_threshold: float = 0.86,
 ) -> RewardResult:
     domain = domain_probability(candidate, tgt, clf)
-    meaning = jaccard_overlap(source_text, candidate)
-    lex = lexicon_coverage(candidate, lexicon_by_domain.get(tgt, []))
+    semantic_sim = float(max(0.0, min(1.0, semantic_similarity_fn(source_text, candidate))))
+    copy_score = rouge_l_copy_score(source_text, candidate)
+    copy_penalty = max(0.0, copy_score - copy_threshold)
 
-    total = (w_domain * domain) + (w_meaning * meaning) + (w_lex * lex)
-    return RewardResult(total=total, breakdown=ScoreBreakdown(domain=domain, meaning=meaning, lex=lex))
+    lex, lex_terms_hit = lex_weighted_evidence(
+        candidate=candidate,
+        tgt=tgt,
+        term_log_odds=term_log_odds,
+        tgt_lexicon=lexicon_by_domain.get(tgt, []),
+    )
+
+    breakdown = ScoreBreakdown(
+        domain=domain,
+        meaning=semantic_sim,
+        lex=lex,
+        semantic_sim=semantic_sim,
+        copy_score=copy_score,
+        copy_penalty=copy_penalty,
+        lex_terms_hit=lex_terms_hit,
+    )
+
+    if semantic_sim < min_semantic_sim:
+        return RewardResult(
+            total=-1e9,
+            breakdown=breakdown,
+            eligible=False,
+            discard_reason=f"semantic_sim<{min_semantic_sim:.2f}",
+        )
+
+    total = domain + (alpha_lex * lex) - (beta_copy * copy_penalty)
+    return RewardResult(total=total, breakdown=breakdown, eligible=True)

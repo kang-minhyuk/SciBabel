@@ -22,6 +22,7 @@ from gemini_client import generate_with_gemini
 from gpt_client import generate_with_gpt
 from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
+from semantic import init_semantic_model, semantic_similarity
 from term_strategy import (
     TermStrategy,
     TermStrategyEngine,
@@ -69,6 +70,8 @@ class CandidateScore(BaseModel):
     total_score: float
     breakdown: dict[str, float]
     temperature: float
+    action: str
+    lex_terms_hit: list[str] = Field(default_factory=list)
 
 
 class TermStrategyItem(BaseModel):
@@ -90,6 +93,10 @@ class TranslateResponse(BaseModel):
     num_returned: int
     cache_hit: bool = False
     term_strategies: list[TermStrategyItem] = Field(default_factory=list)
+    src_warning: bool = False
+    predicted_src: str | None = None
+    predicted_src_confidence: float | None = None
+    prompt_actions_used: list[str] = Field(default_factory=list)
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
@@ -109,6 +116,7 @@ term_log_odds: dict[tuple[str, str], float] = {}
 term_strategy_engine: TermStrategyEngine | None = None
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
+semantic_enabled: bool = False
 
 
 def _generate_with_provider(prompt: str, temperature: float, top_p: float) -> str:
@@ -206,11 +214,15 @@ def _cache_key(text: str, src: str, tgt: str, k: int) -> str:
 
 @app.on_event("startup")
 def startup_event() -> None:
+    global semantic_enabled
     try:
         _load_artifacts()
     except Exception as exc:
         # Delay hard failure; endpoint returns actionable message.
         print(f"[startup] Artifact load warning: {exc}")
+
+    semantic_model_name = os.getenv("SEMANTIC_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+    semantic_enabled = init_semantic_model(semantic_model_name)
 
 
 @app.get("/health")
@@ -244,9 +256,9 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             tgt=payload.tgt,
             clf=clf,
             lexicon_by_domain=lexicon_by_domain,
-            w_domain=0.5,
-            w_meaning=0.3,
-            w_lex=0.2,
+            semantic_similarity_fn=semantic_similarity,
+            term_log_odds=term_log_odds,
+            min_semantic_sim=0.0,
         )
         candidate = CandidateScore(
             text=normalized_text,
@@ -255,8 +267,13 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 "domain": reward.breakdown.domain,
                 "meaning": reward.breakdown.meaning,
                 "lex": reward.breakdown.lex,
+                "semantic_sim": reward.breakdown.semantic_sim,
+                "copy_score": reward.breakdown.copy_score,
+                "copy_penalty": reward.breakdown.copy_penalty,
             },
             temperature=0.0,
+            action="identity",
+            lex_terms_hit=reward.breakdown.lex_terms_hit,
         )
         return TranslateResponse(
             best_candidate=candidate.text,
@@ -268,6 +285,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             num_attempted=0,
             num_returned=1,
             cache_hit=True,
+            prompt_actions_used=["identity"],
         )
 
     cache_ttl_sec = max(0, int(os.getenv("CACHE_TTL_SEC", "3600")))
@@ -284,31 +302,55 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     term_instruction_block = build_term_instruction_block(strategies, max_terms=8)
 
     route_key = f"{payload.src}->{payload.tgt}"
-    action = bandit.choose(route_key)
-    prompt = build_prompt(
-        action=action,
-        text=normalized_text,
-        src=payload.src,
-        tgt=payload.tgt,
-        term_instructions=term_instruction_block,
-    )
+    all_actions = get_prompt_action_names()
+    if payload.k <= len(all_actions):
+        actions_for_slots = all_actions[: payload.k]
+    else:
+        actions_for_slots = list(all_actions)
+        while len(actions_for_slots) < payload.k:
+            actions_for_slots.append(bandit.choose(route_key))
 
     num_generations = payload.k
     max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "0")))
     retry_sleep = float(os.getenv("GEMINI_RETRY_SLEEP_SEC", "1.5"))
     strategy_penalty_weight = float(os.getenv("STRATEGY_PENALTY_WEIGHT", "0.15"))
+    min_semantic_sim = float(os.getenv("MIN_SEMANTIC_SIM", "0.78"))
+    alpha_lex = float(os.getenv("ALPHA_LEX", "0.35"))
+    beta_copy = float(os.getenv("BETA_COPY", "0.5"))
+    copy_threshold = float(os.getenv("COPY_THRESHOLD", "0.86"))
+    src_warning_threshold = float(os.getenv("SRC_WARNING_CONF", "0.55"))
+    target_lex_hints = lexicon_by_domain.get(payload.tgt, [])[:20]
 
     candidate_pool: dict[str, CandidateScore] = {}
     used_fallback = False
     num_attempted = 0
 
-    def _generate_one(temp: float) -> tuple[str, int, bool]:
+    src_labels = list(getattr(clf, "classes_", []))
+    src_probs = clf.predict_proba([normalized_text])[0]
+    src_pred_idx = int(src_probs.argmax())
+    predicted_src = str(src_labels[src_pred_idx]) if src_labels else None
+    predicted_src_conf = float(src_probs[src_pred_idx]) if src_labels else None
+    src_warning = bool(
+        predicted_src
+        and predicted_src != payload.src
+        and (predicted_src_conf is not None and predicted_src_conf >= src_warning_threshold)
+    )
+
+    def _generate_one(action_name: str, temp: float) -> tuple[str, str, int, bool]:
         local_attempts = 0
+        prompt = build_prompt(
+            action=action_name,
+            text=normalized_text,
+            src=payload.src,
+            tgt=payload.tgt,
+            term_instructions=term_instruction_block,
+            target_lexicon_hints=target_lex_hints,
+        )
         for retry_idx in range(max_retries + 1):
             local_attempts += 1
             try:
                 text = _generate_with_provider(prompt=prompt, temperature=temp, top_p=0.95)
-                return text, local_attempts, False
+                return text, action_name, local_attempts, False
             except NotImplementedError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             except Exception as exc:
@@ -318,17 +360,20 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                     time.sleep(retry_sleep)
                     continue
                 if quota_like:
-                    return normalized_text, local_attempts, True
+                    return normalized_text, action_name, local_attempts, True
                 # Non-quota generation error: degrade gracefully for this slot.
-                return normalized_text, local_attempts, True
+                return normalized_text, action_name, local_attempts, True
 
     temperatures = [_temperature_for_step(i, max(2, num_generations)) for i in range(num_generations)]
 
     with ThreadPoolExecutor(max_workers=max(1, num_generations)) as executor:
-        future_map = {executor.submit(_generate_one, t): t for t in temperatures}
+        future_map = {
+            executor.submit(_generate_one, a, t): (a, t)
+            for a, t in zip(actions_for_slots, temperatures)
+        }
         for future in as_completed(future_map):
-            temp = future_map[future]
-            candidate, attempts, slot_fallback = future.result()
+            action_name, temp = future_map[future]
+            candidate, action_name, attempts, slot_fallback = future.result()
             num_attempted += attempts
             used_fallback = used_fallback or slot_fallback
 
@@ -342,10 +387,16 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 tgt=payload.tgt,
                 clf=clf,
                 lexicon_by_domain=lexicon_by_domain,
-                w_domain=0.5,
-                w_meaning=0.3,
-                w_lex=0.2,
+                semantic_similarity_fn=semantic_similarity,
+                term_log_odds=term_log_odds,
+                min_semantic_sim=min_semantic_sim,
+                alpha_lex=alpha_lex,
+                beta_copy=beta_copy,
+                copy_threshold=copy_threshold,
             )
+            if not reward.eligible:
+                continue
+
             strat_pen = strategy_penalty(candidate, strategies)
             final_score = reward.total - (strategy_penalty_weight * strat_pen)
 
@@ -356,9 +407,14 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                     "domain": reward.breakdown.domain,
                     "meaning": reward.breakdown.meaning,
                     "lex": reward.breakdown.lex,
+                    "semantic_sim": reward.breakdown.semantic_sim,
+                    "copy_score": reward.breakdown.copy_score,
+                    "copy_penalty": reward.breakdown.copy_penalty,
                     "strategy_penalty": strat_pen,
                 },
                 temperature=temp,
+                action=action_name,
+                lex_terms_hit=reward.breakdown.lex_terms_hit,
             )
 
             existing = candidate_pool.get(scored_candidate.text)
@@ -372,24 +428,53 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     scored = sorted(candidate_pool.values(), key=lambda c: c.total_score, reverse=True)
 
     if not scored:
-        raise HTTPException(
-            status_code=502,
-            detail="LLM did not return any candidate. Try again later or reduce k.",
+        fallback_reward = compute_reward(
+            source_text=normalized_text,
+            candidate=normalized_text,
+            tgt=payload.tgt,
+            clf=clf,
+            lexicon_by_domain=lexicon_by_domain,
+            semantic_similarity_fn=semantic_similarity,
+            term_log_odds=term_log_odds,
+            min_semantic_sim=0.0,
         )
+        scored = [
+            CandidateScore(
+                text=normalized_text,
+                total_score=fallback_reward.total,
+                breakdown={
+                    "domain": fallback_reward.breakdown.domain,
+                    "meaning": fallback_reward.breakdown.meaning,
+                    "lex": fallback_reward.breakdown.lex,
+                    "semantic_sim": fallback_reward.breakdown.semantic_sim,
+                    "copy_score": fallback_reward.breakdown.copy_score,
+                    "copy_penalty": fallback_reward.breakdown.copy_penalty,
+                    "strategy_penalty": 0.0,
+                },
+                temperature=0.0,
+                action="fallback_identity",
+                lex_terms_hit=fallback_reward.breakdown.lex_terms_hit,
+            )
+        ]
+        used_fallback = True
 
     best = scored[0]
-    bandit.update(route_key, action, best.total_score)
+    bandit.update(route_key, best.action, best.total_score)
 
     response = TranslateResponse(
         best_candidate=best.text,
         best_score=best.total_score,
         score_breakdown=best.breakdown,
         candidates=scored,
-        prompt_action=action,
+        prompt_action=best.action,
         used_fallback=used_fallback,
         num_attempted=num_attempted,
         num_returned=len(scored),
         cache_hit=False,
+        src_warning=src_warning,
+        predicted_src=predicted_src,
+        predicted_src_confidence=predicted_src_conf,
+        prompt_actions_used=actions_for_slots,
         term_strategies=[
             TermStrategyItem(
                 term=s.term,

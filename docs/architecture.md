@@ -20,20 +20,30 @@
 `/translate` flow:
 
 1. Validate payload (`text`, `src`, `tgt`, `k`).
-2. Choose prompt action template from [backend/prompts.py](../backend/prompts.py).
-3. Generate $k$ candidates via Gemini with varied temperature.
-4. Score each candidate with:
+2. Build multi-action prompts from [backend/prompts.py](../backend/prompts.py):
+   - `literal`
+   - `domain_steered`
+   - `process_framing`
+   - `educator`
+3. Generate exactly $k$ candidates in parallel (one per action first, then additional exploration slots if needed).
+4. Filter and score each candidate with semantic constraints:
 
 $$
-R = w_{domain} P(tgt \mid candidate) + w_{meaning} J(src, cand) + w_{lex} C_{lex}(cand, tgt)
+   ext{eligible if } S_{sem}(src,cand) \ge \tau_{sem}
+$$
+
+$$
+R = P(tgt \mid cand) + \alpha\,E_{lex}(cand,tgt) - \beta\,\max(0, C_{copy}(src,cand)-\tau_{copy})
 $$
 
 Where:
 - $P(tgt \mid candidate)$ from trained classifier
-- $J$ is token Jaccard overlap proxy
-- $C_{lex}$ is target-domain lexicon coverage
+- $S_{sem}$ is sentence-embedding similarity (fallback: token overlap)
+- $E_{lex}$ is weighted lexical evidence from `term_stats.csv` log-odds (fallback: lexicon coverage)
+- $C_{copy}$ is ROUGE-L based source-copy score
 
-5. Return best output, score breakdown, and sorted candidates.
+5. Apply strategy penalty from term policy layer and rerank.
+6. Return best output with transparent metadata (`semantic_sim`, `copy_score`, `lex_terms_hit`, actions used, source-warning signals).
 
 ## 2.1) Term strategy layer
 
@@ -59,6 +69,16 @@ During reranking, a small strategy penalty is applied if candidates violate poli
 - replacing `intranslatable` term.
 
 `/translate` returns transparent `term_strategies` metadata.
+
+## 2.2) Source-domain mismatch warning
+
+For each request, backend also predicts the source-domain label of the input text using the classifier.
+If predicted source differs from user-provided `src` and confidence exceeds configured threshold,
+response includes:
+
+- `src_warning = true`
+- `predicted_src`
+- `predicted_src_confidence`
 
 ## 3) Optional exploration policy
 
