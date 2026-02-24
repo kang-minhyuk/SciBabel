@@ -23,7 +23,7 @@ from gemini_client import generate_with_gemini
 from gpt_client import generate_with_gpt
 from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
-from semantic import init_semantic_model, semantic_similarity
+from semantic import get_semantic_mode, init_semantic_model, semantic_similarity
 from term_strategy import (
     TermStrategy,
     TermStrategyEngine,
@@ -98,6 +98,8 @@ class TranslateResponse(BaseModel):
     predicted_src: str | None = None
     predicted_src_confidence: float | None = None
     prompt_actions_used: list[str] = Field(default_factory=list)
+    fallback_reason: str | None = None
+    semantic_mode: str = "overlap"
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
@@ -243,6 +245,14 @@ def _rule_based_fallback_translation(text: str, tgt: str, strategies: list[TermS
     return out
 
 
+def _pick_fallback_reason(reasons: set[str]) -> str | None:
+    priority = ["no_key", "timeout", "api_error", "filter_empty", "other"]
+    for key in priority:
+        if key in reasons:
+            return key
+    return None
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     global semantic_enabled
@@ -317,6 +327,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             num_returned=1,
             cache_hit=True,
             prompt_actions_used=["identity"],
+            fallback_reason=None,
+            semantic_mode=get_semantic_mode(),
         )
 
     cache_ttl_sec = max(0, int(os.getenv("CACHE_TTL_SEC", "3600")))
@@ -360,6 +372,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     candidate_pool: dict[str, CandidateScore] = {}
     used_fallback = False
     num_attempted = 0
+    fallback_reasons: set[str] = set()
 
     src_labels = list(getattr(clf, "classes_", []))
     src_probs = clf.predict_proba([normalized_text])[0]
@@ -372,7 +385,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         and (predicted_src_conf is not None and predicted_src_conf >= src_warning_threshold)
     )
 
-    def _generate_one(action_name: str, temp: float) -> tuple[str, str, int, bool]:
+    def _generate_one(action_name: str, temp: float) -> tuple[str, str, int, bool, str | None]:
         local_attempts = 0
         prompt = build_prompt(
             action=action_name,
@@ -386,24 +399,29 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             local_attempts += 1
             try:
                 text = _generate_with_provider(prompt=prompt, temperature=temp, top_p=0.95)
-                return text, action_name, local_attempts, False
+                return text, action_name, local_attempts, False, None
             except NotImplementedError as exc:
                 fallback_text = _rule_based_fallback_translation(
                     text=normalized_text,
                     tgt=payload.tgt,
                     strategies=strategies,
                 )
-                return fallback_text, action_name, local_attempts, True
+                msg = str(exc).lower()
+                reason = "no_key" if ("api_key" in msg or "not configured" in msg) else "api_error"
+                return fallback_text, action_name, local_attempts, True, reason
             except Exception as exc:
                 message = str(exc)
                 quota_like = ("429" in message) or ("RESOURCE_EXHAUSTED" in message)
+                timeout_like = ("timeout" in message.lower()) or ("timed out" in message.lower())
                 if quota_like and retry_idx < max_retries and retry_sleep > 0:
                     time.sleep(retry_sleep)
                     continue
                 if quota_like:
-                    return normalized_text, action_name, local_attempts, True
+                    return normalized_text, action_name, local_attempts, True, "api_error"
                 # Non-quota generation error: degrade gracefully for this slot.
-                return normalized_text, action_name, local_attempts, True
+                if timeout_like:
+                    return normalized_text, action_name, local_attempts, True, "timeout"
+                return normalized_text, action_name, local_attempts, True, "other"
 
     temperatures = [_temperature_for_step(i, max(2, num_generations)) for i in range(num_generations)]
 
@@ -414,13 +432,16 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         }
         for future in as_completed(future_map):
             action_name, temp = future_map[future]
-            candidate, action_name, attempts, slot_fallback = future.result()
+            candidate, action_name, attempts, slot_fallback, slot_reason = future.result()
             num_attempted += attempts
             used_fallback = used_fallback or slot_fallback
+            if slot_fallback and slot_reason:
+                fallback_reasons.add(slot_reason)
 
             if not candidate.strip():
                 candidate = normalized_text
                 used_fallback = True
+                fallback_reasons.add("other")
 
             reward = compute_reward(
                 source_text=normalized_text,
@@ -498,6 +519,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             )
         ]
         used_fallback = True
+        fallback_reasons.add("filter_empty")
 
     best = scored[0]
     if best.action in get_prompt_action_names():
@@ -517,6 +539,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         predicted_src=predicted_src,
         predicted_src_confidence=predicted_src_conf,
         prompt_actions_used=actions_for_slots,
+        fallback_reason=_pick_fallback_reason(fallback_reasons),
+        semantic_mode=get_semantic_mode(),
         term_strategies=[
             TermStrategyItem(
                 term=s.term,

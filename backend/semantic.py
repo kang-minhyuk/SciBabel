@@ -9,6 +9,10 @@ _semantic_model: Any | None = None
 _semantic_enabled: bool = False
 
 
+def get_semantic_mode() -> str:
+    return "embedding" if _semantic_enabled and _semantic_model is not None else "overlap"
+
+
 def _token_jaccard(a: str, b: str) -> float:
     ta = {m.group(0).lower() for m in TOKEN_RE.finditer(a)}
     tb = {m.group(0).lower() for m in TOKEN_RE.finditer(b)}
