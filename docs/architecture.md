@@ -10,6 +10,34 @@
 4. Train domain classifier (TF-IDF + LogisticRegression) with [scripts/04_train_domain_classifier.py](../scripts/04_train_domain_classifier.py):
    - `models/domain_clf.joblib`
 
+## 1.1) Production text-mining pipeline
+
+Config-driven pipeline lives under [scripts/textmining](../scripts/textmining) and [configs/textmining/domains.yaml](../configs/textmining/domains.yaml).
+
+Steps:
+
+1. Fetch metadata (title/abstract/categories/timestamps only; no PDFs):
+   - [scripts/textmining/fetch_arxiv.py](../scripts/textmining/fetch_arxiv.py)
+   - [scripts/textmining/fetch_chemrxiv.py](../scripts/textmining/fetch_chemrxiv.py)
+2. Build balanced cleaned corpus:
+   - [scripts/textmining/build_corpus.py](../scripts/textmining/build_corpus.py)
+   - Output: `data/processed/corpus.parquet`
+3. Mine robust domain terms with log-odds z-scores:
+   - [scripts/textmining/mine_terms.py](../scripts/textmining/mine_terms.py)
+   - Outputs:
+     - `data/processed/term_stats.csv`
+     - `data/processed/domain_lexicon.json`
+     - `reports/textmining/lexicon_report.md`
+4. Train calibrated domain classifier:
+   - [scripts/textmining/train_domain_classifier.py](../scripts/textmining/train_domain_classifier.py)
+   - Outputs:
+     - `models/domain_clf.joblib`
+     - `models/domain_clf_metrics.json`
+     - `reports/textmining/classifier_report.md`
+5. Run artifact quality gates:
+   - [scripts/textmining/validate_artifacts.py](../scripts/textmining/validate_artifacts.py)
+   - Output: `reports/textmining/validation_report.md`
+
 ## 2) Online translation API
 
 [backend/app.py](../backend/app.py) exposes:

@@ -1,0 +1,73 @@
+seed: 42
+corpus:
+  min_abstract_chars: 200
+  target_doc_count_per_domain: 20000
+
+domains:
+  CSM:
+    sources: [arxiv]
+    target_doc_count: 20000
+    arxiv:
+      categories:
+        - cs.LG
+        - cs.AI
+        - cs.CL
+        - cs.CV
+        - cs.RO
+        - stat.ML
+        - math.OC
+        - math.NA
+    keyword_filters:
+      - transformer
+      - neural
+      - optimization
+      - algorithm
+      - gradient
+      - graph
+      - learning
+
+  PM:
+    sources: [arxiv]
+    target_doc_count: 20000
+    arxiv:
+      categories:
+        - cond-mat.mtrl-sci
+        - cond-mat.stat-mech
+        - cond-mat.soft
+        - cond-mat.str-el
+        - physics.comp-ph
+        - physics.app-ph
+        - physics.chem-ph
+    keyword_filters:
+      - phonon
+      - lattice
+      - hamiltonian
+      - band
+      - stress
+      - conductivity
+      - scattering
+
+  CCE:
+    sources: [arxiv, chemrxiv]
+    target_doc_count: 20000
+    arxiv:
+      categories:
+        - cond-mat.mtrl-sci
+        - physics.chem-ph
+        - q-bio.BM
+    chemrxiv:
+      category_filters:
+        - Chemical Engineering and Industrial Chemistry
+        - Reaction Engineering
+        - Separation Processes
+        - Catalysis
+        - Process Systems Engineering
+        - Electrochemistry
+        - Materials Chemistry
+    keyword_filters:
+      - reactor
+      - catalysis
+      - separation
+      - adsorption
+      - process
+      - distillation
