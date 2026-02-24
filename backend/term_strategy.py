@@ -52,6 +52,47 @@ ACRONYM_VARIANTS = {
     "machine learning": "machine learning",
 }
 
+NOISY_TERMS = {
+    "model",
+    "predict",
+    "prediction",
+    "steps",
+    "reduces",
+    "method",
+    "methods",
+    "result",
+    "results",
+    "study",
+    "approach",
+    "propose",
+    "show",
+    "data",
+    "system",
+}
+STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "under",
+    "with",
+    "we",
+    "our",
+}
+
 
 @dataclass
 class TermStrategy:
@@ -82,6 +123,22 @@ def normalize_term(term: str) -> str:
     return ACRONYM_VARIANTS.get(t, t)
 
 
+def is_term_noise(term: str) -> bool:
+    t = normalize_term(term)
+    if not t:
+        return True
+    if "updatedgpt" in t or "native=" in t or "domain-specific concept" in t:
+        return True
+    toks = [x for x in t.split() if x]
+    if not toks:
+        return True
+    if all(tok in STOPWORDS for tok in toks):
+        return True
+    if len(toks) == 1 and toks[0] in NOISY_TERMS:
+        return True
+    return False
+
+
 def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
@@ -91,7 +148,7 @@ class TermStrategyEngine:
         self,
         lexicon_by_domain: dict[str, list[str]],
         aliases_path: str | Path,
-        term_log_odds: dict[tuple[str, str], float] | None = None,
+        term_log_odds: dict[tuple[str, str], dict[str, float]] | None = None,
     ) -> None:
         self.lexicon_by_domain = lexicon_by_domain
         self.lexicon_norm = {
@@ -126,6 +183,8 @@ class TermStrategyEngine:
                 norm = normalize_term(raw)
                 if len(norm) < 3:
                     continue
+                if is_term_noise(norm):
+                    continue
 
                 toks = token_set(norm)
                 if not toks:
@@ -149,6 +208,8 @@ class TermStrategyEngine:
             norm = normalize_term(raw)
             if norm in existing:
                 continue
+            if is_term_noise(norm):
+                continue
             out.append(KeyTerm(term=norm, span=(m.start(), m.end())))
             existing.add(norm)
             if len(out) >= max_terms:
@@ -167,9 +228,10 @@ class TermStrategyEngine:
         if canonical and canonical in tgt_lex:
             return 0.8
 
-        log_odds = self.term_log_odds.get((tgt, norm))
-        if log_odds is not None:
-            return float(max(0.0, min(1.0, _sigmoid(log_odds))))
+        stat = self.term_log_odds.get((tgt, norm))
+        if stat is not None:
+            delta = float(stat.get("delta", stat.get("z", 0.0)))
+            return float(max(0.0, min(1.0, _sigmoid(delta))))
 
         # weak lexical hint
         overlap = [t for t in token_set(norm) if t in {tok for x in tgt_lex for tok in x.split()}]
@@ -258,15 +320,17 @@ def build_term_instruction_block(strategies: list[TermStrategy], max_terms: int 
         "Term handling rules:",
         "- equivalent: translate normally using target-domain wording",
         "- analogous: prefer mapped neighbor term",
-        "- unique: preserve original term and add short parenthetical explanation",
-        "- intranslatable: preserve term and append '(domain-specific concept)'",
+        "- unique: preserve original term and briefly explain in plain language",
+        "- intranslatable: preserve term and explain as a specialized concept",
         "",
         "Apply these for key terms:",
     ]
 
     for s in strategies[:max_terms]:
-        neighbor = f" | neighbor={s.neighbor}" if s.neighbor else ""
-        lines.append(f"- {s.term} => {s.type} (native={s.native_score:.2f}{neighbor})")
+        if is_term_noise(s.term):
+            continue
+        neighbor = f" | neighbor {s.neighbor}" if s.neighbor else ""
+        lines.append(f"- {s.term} => {s.type}{neighbor}")
 
     return "\n".join(lines)
 

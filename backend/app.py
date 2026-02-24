@@ -115,7 +115,7 @@ app.add_middleware(
 
 clf = None
 lexicon_by_domain: dict[str, list[str]] = {}
-term_log_odds: dict[tuple[str, str], float] = {}
+term_log_odds: dict[tuple[str, str], dict[str, float]] = {}
 term_strategy_engine: TermStrategyEngine | None = None
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
@@ -179,7 +179,31 @@ def _load_artifacts() -> None:
         )
 
     clf = joblib.load(MODEL_PATH)
-    lexicon_by_domain = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
+    lexicon_raw = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
+    lexicon_by_domain = {}
+    for d in ["CSM", "PM", "CCE"]:
+        val = lexicon_raw.get(d, [])
+        if isinstance(val, list):
+            lexicon_by_domain[d] = [str(x) for x in val]
+            continue
+        if isinstance(val, dict):
+            # Prefer bigrams/trigrams for steering and lex scoring.
+            merged = (
+                [str(x) for x in val.get("top_bigrams", [])]
+                + [str(x) for x in val.get("top_trigrams", [])]
+                + [str(x) for x in val.get("top_terms", [])]
+            )
+            seen = set()
+            deduped = []
+            for t in merged:
+                tl = t.lower()
+                if tl in seen:
+                    continue
+                deduped.append(t)
+                seen.add(tl)
+            lexicon_by_domain[d] = deduped
+            continue
+        lexicon_by_domain[d] = []
 
     term_log_odds = {}
     if TERM_STATS_PATH.exists():
@@ -191,10 +215,22 @@ def _load_artifacts() -> None:
                 if not domain or not term:
                     continue
                 try:
-                    score = float(row.get("log_odds", "0") or 0)
+                    z = float(row.get("z", row.get("log_odds", "0")) or 0)
                 except ValueError:
-                    score = 0.0
-                term_log_odds[(domain, term.lower())] = score
+                    z = 0.0
+                try:
+                    delta = float(row.get("delta", row.get("log_odds", "0")) or 0)
+                except ValueError:
+                    delta = 0.0
+                try:
+                    ng = float(row.get("ngram_len", str(max(1, len(term.split())))) or 1)
+                except ValueError:
+                    ng = 1.0
+                term_log_odds[(domain, term.lower())] = {
+                    "z": z,
+                    "delta": delta,
+                    "ngram_len": ng,
+                }
 
     term_strategy_engine = TermStrategyEngine(
         lexicon_by_domain=lexicon_by_domain,
@@ -226,12 +262,6 @@ def _rule_based_fallback_translation(text: str, tgt: str, strategies: list[TermS
         term_pat = re.compile(rf"\\b{re.escape(s.term)}\\b", re.IGNORECASE)
         if s.type == "analogous" and s.neighbor:
             out = term_pat.sub(s.neighbor, out)
-        elif s.type == "intranslatable":
-            if term_pat.search(out) and "domain-specific concept" not in out.lower():
-                out = term_pat.sub(f"{s.term} (domain-specific concept)", out, count=1)
-        elif s.type == "unique":
-            if term_pat.search(out) and "(" not in out:
-                out = term_pat.sub(f"{s.term} (specialized term)", out, count=1)
 
     lead_map = {
         "CSM": "From a computational modeling perspective, ",
@@ -251,6 +281,16 @@ def _pick_fallback_reason(reasons: set[str]) -> str | None:
         if key in reasons:
             return key
     return None
+
+
+def _sanitize_output_text(text: str) -> str:
+    out = text
+    out = re.sub(r"\(\s*domain-specific concept\s*\)", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\(\s*native\s*=\s*[^\)]*\)", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\[\s*updatedgpt[^\]]*\]", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"updatedgpt[_\-a-z0-9]*", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
 
 
 @app.on_event("startup")
@@ -366,6 +406,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
     alpha_lex = float(os.getenv("ALPHA_LEX", "0.35"))
     beta_copy = float(os.getenv("BETA_COPY", "0.5"))
     copy_threshold = float(os.getenv("COPY_THRESHOLD", "0.86"))
+    lex_score_clamp = float(os.getenv("LEX_SCORE_CLAMP", "2.0"))
     src_warning_threshold = float(os.getenv("SRC_WARNING_CONF", "0.55"))
     target_lex_hints = lexicon_by_domain.get(payload.tgt, [])[:20]
 
@@ -443,6 +484,8 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 used_fallback = True
                 fallback_reasons.add("other")
 
+            candidate = _sanitize_output_text(candidate)
+
             reward = compute_reward(
                 source_text=normalized_text,
                 candidate=candidate,
@@ -455,6 +498,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 alpha_lex=alpha_lex,
                 beta_copy=beta_copy,
                 copy_threshold=copy_threshold,
+                lex_score_clamp=lex_score_clamp,
             )
             if not reward.eligible:
                 continue
@@ -526,7 +570,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         bandit.update(route_key, best.action, best.total_score)
 
     response = TranslateResponse(
-        best_candidate=best.text,
+        best_candidate=_sanitize_output_text(best.text),
         best_score=best.total_score,
         score_breakdown=best.breakdown,
         candidates=scored,
