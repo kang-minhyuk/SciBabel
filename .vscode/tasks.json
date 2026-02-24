@@ -2,22 +2,34 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "SciBabel: Run Backend",
+      "label": "SciBabel: Backend",
       "type": "shell",
-      "command": "cd ${workspaceFolder}/backend && python3.11 -m uvicorn app:app --reload --host 0.0.0.0 --port 8000",
+      "command": "cd ${workspaceFolder}/backend && python3 -m uvicorn app:app --reload --host 0.0.0.0 --port 8000",
       "isBackground": true,
       "problemMatcher": []
     },
     {
-      "label": "SciBabel: Run Eval",
+      "label": "SciBabel: Test",
       "type": "shell",
-      "command": "cd ${workspaceFolder} && make eval",
+      "command": "cd ${workspaceFolder} && make test",
       "problemMatcher": []
     },
     {
-      "label": "SciBabel: Diagnose",
+      "label": "SciBabel: Test Backend",
       "type": "shell",
-      "command": "cd ${workspaceFolder} && make diagnose",
+      "command": "cd ${workspaceFolder} && make test-backend",
+      "problemMatcher": []
+    },
+    {
+      "label": "SciBabel: Smoke",
+      "type": "shell",
+      "command": "cd ${workspaceFolder} && make smoke",
+      "problemMatcher": []
+    },
+    {
+      "label": "SciBabel: Smoke Auto Source",
+      "type": "shell",
+      "command": "cd ${workspaceFolder} && make smoke-auto",
       "problemMatcher": []
     }
   ]

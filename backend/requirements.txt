@@ -10,3 +10,7 @@ feedparser>=6.0.11
 pyarrow>=17.0.0
 sentence-transformers>=3.0.1
 PyYAML>=6.0.2
+openai>=1.65.0
+pytest>=8.3.0
+spacy>=3.7.0
+yake>=0.4.8

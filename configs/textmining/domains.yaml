@@ -1,22 +1,23 @@
 seed: 42
 corpus:
   min_abstract_chars: 200
-  target_doc_count_per_domain: 20000
+  target_doc_count_per_domain: 15000
+  min_docs_per_domain: 5000
+  min_style_terms_per_domain: 120
 
 domains:
   CSM:
     sources: [arxiv]
-    target_doc_count: 20000
+    target_doc_count: 15000
     arxiv:
       categories:
         - cs.LG
         - cs.AI
         - cs.CL
         - cs.CV
-        - cs.RO
         - stat.ML
         - math.OC
-        - math.NA
+        - math.ST
     keyword_filters:
       - transformer
       - neural
@@ -28,15 +29,13 @@ domains:
 
   PM:
     sources: [arxiv]
-    target_doc_count: 20000
+    target_doc_count: 15000
     arxiv:
       categories:
         - cond-mat.mtrl-sci
-        - cond-mat.stat-mech
+        - cond-mat.mes-hall
         - cond-mat.soft
-        - cond-mat.str-el
         - physics.comp-ph
-        - physics.app-ph
         - physics.chem-ph
     keyword_filters:
       - phonon
@@ -47,27 +46,49 @@ domains:
       - conductivity
       - scattering
 
-  CCE:
-    sources: [arxiv, chemrxiv]
-    target_doc_count: 20000
-    arxiv:
-      categories:
-        - cond-mat.mtrl-sci
-        - physics.chem-ph
-        - q-bio.BM
-    chemrxiv:
-      category_filters:
-        - Chemical Engineering and Industrial Chemistry
-        - Reaction Engineering
-        - Separation Processes
-        - Catalysis
-        - Process Systems Engineering
-        - Electrochemistry
-        - Materials Chemistry
+  CHEM:
+    sources: [openalex]
+    target_doc_count: 10000
+    openalex:
+      display_name: Chemistry
+      concept_ids: [C178790620]
+      keywords:
+        - synthesis
+        - molecular
+        - spectroscopy
+        - catalyst
+    keyword_filters:
+      - chemistry
+      - reaction
+      - molecular
+
+  CHEME:
+    sources: [openalex]
+    target_doc_count: 10000
+    openalex:
+      display_name: Chemical Engineering
+      concept_ids: [C185592680]
+      keywords:
+        - reactor
+        - separation
+        - distillation
+        - membrane
+        - adsorption
+        - catalysis
+        - mass transfer
+        - transport
+        - process control
+        - reaction engineering
+        - heat transfer
     keyword_filters:
       - reactor
-      - catalysis
       - separation
-      - adsorption
-      - process
       - distillation
+      - membrane
+      - adsorption
+      - catalysis
+      - mass transfer
+      - transport
+      - process control
+      - reaction engineering
+      - heat transfer

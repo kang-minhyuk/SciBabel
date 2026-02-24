@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -24,6 +25,10 @@ from gpt_client import generate_with_gpt
 from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
 from semantic import get_semantic_mode, init_semantic_model, semantic_similarity
+from llm.fake_client import FakeExplainClient
+from llm.openai_client import ExplainRequest, OpenAIExplainClient
+from domain_detect import SourceDetector
+from terms.engine import AnnotationArtifactsMissing, TermAnnotationEngine
 from term_strategy import (
     TermStrategy,
     TermStrategyEngine,
@@ -33,13 +38,17 @@ from term_strategy import (
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
 
-Domain = Literal["CSM", "PM", "CCE"]
+Domain = Literal["CSM", "PM", "CHEM", "CHEME", "CCE"]
+SourceDomain = Literal["CSM", "PM", "CHEM", "CHEME", "CCE", "auto"]
+AudienceLevel = Literal["undergrad", "grad", "expert"]
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = ROOT / "models" / "domain_clf.joblib"
 LEXICON_PATH = ROOT / "data" / "processed" / "domain_lexicon.json"
 TERM_STATS_PATH = ROOT / "data" / "processed" / "term_stats.csv"
 TERM_ALIASES_PATH = ROOT / "backend" / "term_aliases.json"
+EXPLAIN_CACHE_DB = ROOT / "backend" / "explain_cache.sqlite3"
+FEEDBACK_DB = ROOT / "backend" / "feedback.sqlite3"
 
 
 def _get_cors_origins() -> list[str]:
@@ -58,6 +67,36 @@ class TranslateRequest(BaseModel):
     k: int = Field(default=2, ge=2, le=8)
 
 
+class AnnotateRequest(BaseModel):
+    text: str = Field(min_length=3)
+    src: SourceDomain = "auto"
+    tgt: Domain
+    audience_level: AudienceLevel = "grad"
+    subtrack: str | None = None
+    max_terms: int = Field(default=8, ge=1, le=20)
+    include_short_explanations: bool = False
+
+
+class ExplainRequestBody(BaseModel):
+    text: str = Field(min_length=3)
+    term: str = Field(min_length=1)
+    src: SourceDomain = "auto"
+    tgt: Domain
+    audience_level: AudienceLevel = "grad"
+    subtrack: str | None = None
+    analogs: list[str] = Field(default_factory=list)
+    detail: Literal["short", "long"] = "short"
+
+
+class FeedbackRequest(BaseModel):
+    term: str = Field(min_length=1)
+    src: SourceDomain = "auto"
+    tgt: Domain
+    selected_analog: str | None = None
+    helpful: bool
+    note: str | None = None
+
+
 def _temperature_for_step(step: int, total_steps: int) -> float:
     if total_steps <= 1:
         return 0.2
@@ -73,6 +112,7 @@ class CandidateScore(BaseModel):
     temperature: float
     action: str
     lex_terms_hit: list[str] = Field(default_factory=list)
+    lex_terms_hit_style: list[str] = Field(default_factory=list)
 
 
 class TermStrategyItem(BaseModel):
@@ -100,6 +140,7 @@ class TranslateResponse(BaseModel):
     prompt_actions_used: list[str] = Field(default_factory=list)
     fallback_reason: str | None = None
     semantic_mode: str = "overlap"
+    lexicon_mode: str = "style"
 
 
 app = FastAPI(title="SciBabel API", version="0.1.0")
@@ -120,6 +161,70 @@ term_strategy_engine: TermStrategyEngine | None = None
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
 semantic_enabled: bool = False
+annotation_engine: TermAnnotationEngine | None = None
+explain_client: OpenAIExplainClient | FakeExplainClient | None = None
+source_detector: SourceDetector | None = None
+
+
+def _init_feedback_db() -> None:
+    FEEDBACK_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(FEEDBACK_DB)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS term_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                term TEXT NOT NULL,
+                src TEXT NOT NULL,
+                tgt TEXT NOT NULL,
+                selected_analog TEXT,
+                helpful INTEGER NOT NULL,
+                note TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _load_annotation_engine() -> None:
+    global annotation_engine
+    src_th = float(os.getenv("UNFAMILIAR_SRC_THRESHOLD", "0.35"))
+    tgt_th = float(os.getenv("UNFAMILIAR_TGT_THRESHOLD", "0.45"))
+    analog_th = float(os.getenv("ANALOG_SIM_THRESHOLD", "0.20"))
+    annotation_engine = TermAnnotationEngine(
+        root=ROOT,
+        src_threshold=src_th,
+        tgt_threshold=tgt_th,
+        analog_threshold=analog_th,
+    )
+
+
+def _load_explain_client() -> None:
+    global explain_client
+    if os.getenv("SCIBABEL_FAKE_LLM", "0") == "1":
+        explain_client = FakeExplainClient()
+        return
+    explain_client = OpenAIExplainClient(db_path=EXPLAIN_CACHE_DB)
+
+
+def _load_source_detector() -> None:
+    global source_detector
+    source_detector = SourceDetector(model_path=MODEL_PATH)
+
+
+def _ensure_source_detector() -> SourceDetector:
+    global source_detector
+    if source_detector is None:
+        try:
+            _load_source_detector()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Source detector unavailable: {exc}") from exc
+    if source_detector is None:
+        raise HTTPException(status_code=503, detail="Source detector unavailable")
+    return source_detector
 
 
 def _generate_with_provider(prompt: str, temperature: float, top_p: float) -> str:
@@ -181,7 +286,7 @@ def _load_artifacts() -> None:
     clf = joblib.load(MODEL_PATH)
     lexicon_raw = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
     lexicon_by_domain = {}
-    for d in ["CSM", "PM", "CCE"]:
+    for d in ["CSM", "PM", "CHEM", "CHEME", "CCE"]:
         val = lexicon_raw.get(d, [])
         if isinstance(val, list):
             lexicon_by_domain[d] = [str(x) for x in val]
@@ -189,7 +294,10 @@ def _load_artifacts() -> None:
         if isinstance(val, dict):
             # Prefer bigrams/trigrams for steering and lex scoring.
             merged = (
-                [str(x) for x in val.get("top_bigrams", [])]
+                [str(x) for x in val.get("bigrams", [])]
+                + [str(x) for x in val.get("trigrams", [])]
+                + [str(x) for x in val.get("style", [])]
+                + [str(x) for x in val.get("top_bigrams", [])]
                 + [str(x) for x in val.get("top_trigrams", [])]
                 + [str(x) for x in val.get("top_terms", [])]
             )
@@ -266,6 +374,8 @@ def _rule_based_fallback_translation(text: str, tgt: str, strategies: list[TermS
     lead_map = {
         "CSM": "From a computational modeling perspective, ",
         "PM": "From a physics-oriented interpretation, ",
+        "CHEM": "From a chemistry perspective, ",
+        "CHEME": "From a chemical engineering standpoint, ",
         "CCE": "From a process-engineering standpoint, ",
     }
     lead = lead_map.get(tgt, f"In {tgt} terms, ")
@@ -305,10 +415,202 @@ def startup_event() -> None:
     semantic_model_name = os.getenv("SEMANTIC_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
     semantic_enabled = init_semantic_model(semantic_model_name)
 
+    try:
+        _load_annotation_engine()
+    except Exception as exc:
+        print(f"[startup] Annotation engine warning: {exc}")
+
+    try:
+        _load_explain_client()
+    except Exception as exc:
+        print(f"[startup] Explain client warning: {exc}")
+
+    try:
+        _load_source_detector()
+    except Exception as exc:
+        print(f"[startup] Source detector warning: {exc}")
+
+    try:
+        _init_feedback_db()
+    except Exception as exc:
+        print(f"[startup] Feedback DB warning: {exc}")
+
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "OK"}
+
+
+def _ensure_annotation_ready() -> TermAnnotationEngine:
+    global annotation_engine
+    if annotation_engine is None:
+        try:
+            _load_annotation_engine()
+        except AnnotationArtifactsMissing as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Annotation engine unavailable: {exc}") from exc
+    if annotation_engine is None:
+        raise HTTPException(status_code=503, detail="Annotation engine unavailable. Run make textmining-all.")
+    return annotation_engine
+
+
+def _ensure_explain_ready() -> OpenAIExplainClient | FakeExplainClient:
+    global explain_client
+    if explain_client is None:
+        try:
+            _load_explain_client()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Explain service unavailable: {exc}") from exc
+    if explain_client is None:
+        raise HTTPException(status_code=503, detail="Explain service unavailable.")
+    return explain_client
+
+
+@app.post("/annotate")
+def annotate(payload: AnnotateRequest) -> dict[str, object]:
+    engine = _ensure_annotation_ready()
+    detector = _ensure_source_detector()
+    det = detector.detect_source(_sanitize_output_text(payload.text))
+
+    src_warning = False
+    src_warning_reason = "none"
+    src_used = str(payload.src)
+
+    if payload.src == "auto":
+        src_used = str(det.get("predicted_src") or "CSM")
+        if bool(det.get("is_ambiguous", False)):
+            src_warning = True
+            src_warning_reason = str(det.get("reason") or "ambiguous")
+        print(
+            "domain_detect:",
+            {
+                "predicted": det.get("predicted_src"),
+                "conf": det.get("confidence"),
+                "top2_gap": det.get("top2_gap"),
+                "ambiguous": det.get("is_ambiguous"),
+                "reason": det.get("reason"),
+            },
+        )
+    else:
+        src_used = str(payload.src)
+        pred = str(det.get("predicted_src") or "")
+        conf = float(det.get("confidence") or 0.0)
+        if pred and pred != src_used and conf >= 0.65:
+            src_warning = True
+            src_warning_reason = "mismatch"
+
+    out = engine.annotate(
+        text=_sanitize_output_text(payload.text),
+        src=src_used,
+        tgt=payload.tgt,
+        max_terms=payload.max_terms,
+    )
+
+    if payload.include_short_explanations:
+        client = _ensure_explain_ready()
+        for term in out.get("terms", []):
+            if not isinstance(term, dict) or not term.get("flagged"):
+                continue
+            analogs = [str(x.get("candidate", "")) for x in term.get("analogs", []) if isinstance(x, dict)]
+            req = ExplainRequest(
+                text=payload.text,
+                term=str(term.get("term", "")),
+                src=src_used,
+                tgt=payload.tgt,
+                audience_level=payload.audience_level,
+                subtrack=payload.subtrack or "",
+                analogs=analogs,
+                detail="short",
+            )
+            try:
+                explained = client.explain(req)
+                term["short_explanation"] = explained.get("short_explanation", "")
+            except Exception:
+                term["short_explanation"] = ""
+
+    return {
+        "predicted_src": det.get("predicted_src"),
+        "predicted_src_confidence": det.get("confidence"),
+        "predicted_src_probs": det.get("probs", {}),
+        "src_used": src_used,
+        "src_warning": src_warning,
+        "src_warning_reason": src_warning_reason,
+        "is_ambiguous": bool(det.get("is_ambiguous", False)),
+        "top2_gap": det.get("top2_gap"),
+        "suggested_src": det.get("predicted_src"),
+        "terms": out.get("terms", []),
+    }
+
+
+@app.post("/detect_source")
+def detect_source(payload: dict[str, str]) -> dict[str, object]:
+    text = str(payload.get("text", "")).strip()
+    if len(text) < 3:
+        raise HTTPException(status_code=422, detail="text is required")
+    detector = _ensure_source_detector()
+    return detector.detect_source(_sanitize_output_text(text))
+
+
+@app.post("/explain")
+def explain(payload: ExplainRequestBody) -> dict[str, object]:
+    _ensure_annotation_ready()
+    client = _ensure_explain_ready()
+    detector = _ensure_source_detector()
+
+    src_effective = payload.src
+    if payload.src == "auto":
+        det = detector.detect_source(_sanitize_output_text(payload.text))
+        pred = str(det.get("predicted_src") or "")
+        src_effective = pred if pred in {"CSM", "PM", "CHEM", "CHEME", "CCE"} else "CSM"
+
+    req = ExplainRequest(
+        text=_sanitize_output_text(payload.text),
+        term=_sanitize_output_text(payload.term),
+        src=str(src_effective),
+        tgt=payload.tgt,
+        audience_level=payload.audience_level,
+        subtrack=payload.subtrack or "",
+        analogs=[_sanitize_output_text(a) for a in payload.analogs[:5]],
+        detail=payload.detail,
+    )
+
+    try:
+        out = client.explain(req)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Explain request failed: {exc}") from exc
+
+    return out
+
+
+@app.post("/feedback")
+def feedback(payload: FeedbackRequest) -> dict[str, object]:
+    try:
+        _init_feedback_db()
+        conn = sqlite3.connect(FEEDBACK_DB)
+        try:
+            conn.execute(
+                """
+                INSERT INTO term_feedback(created_at, term, src, tgt, selected_analog, helpful, note)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    time.time(),
+                    _sanitize_output_text(payload.term),
+                    payload.src,
+                    payload.tgt,
+                    _sanitize_output_text(payload.selected_analog or "") or None,
+                    1 if payload.helpful else 0,
+                    _sanitize_output_text(payload.note or "") or None,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to store feedback: {exc}") from exc
+
+    return {"status": "ok"}
 
 
 @app.post("/translate", response_model=TranslateResponse)
@@ -355,6 +657,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
             temperature=0.0,
             action="identity",
             lex_terms_hit=reward.breakdown.lex_terms_hit,
+            lex_terms_hit_style=reward.breakdown.lex_terms_hit,
         )
         return TranslateResponse(
             best_candidate=candidate.text,
@@ -521,6 +824,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 temperature=temp,
                 action=action_name,
                 lex_terms_hit=reward.breakdown.lex_terms_hit,
+                lex_terms_hit_style=reward.breakdown.lex_terms_hit,
             )
 
             existing = candidate_pool.get(scored_candidate.text)
@@ -560,6 +864,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
                 temperature=0.0,
                 action="fallback_identity",
                 lex_terms_hit=fallback_reward.breakdown.lex_terms_hit,
+                lex_terms_hit_style=fallback_reward.breakdown.lex_terms_hit,
             )
         ]
         used_fallback = True
@@ -585,6 +890,7 @@ def translate(payload: TranslateRequest) -> TranslateResponse:
         prompt_actions_used=actions_for_slots,
         fallback_reason=_pick_fallback_reason(fallback_reasons),
         semantic_mode=get_semantic_mode(),
+        lexicon_mode="style",
         term_strategies=[
             TermStrategyItem(
                 term=s.term,

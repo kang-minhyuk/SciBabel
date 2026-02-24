@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,21 @@ DEBUG_PATTERNS = [
 ]
 
 WHITESPACE_RE = re.compile(r"\s+")
+
+
+def stoplists_dir() -> Path:
+    return Path(__file__).resolve().parent / "stoplists"
+
+
+def load_stoplist(name: str) -> set[str]:
+    path = stoplists_dir() / name
+    if not path.exists():
+        return set()
+    return {
+        line.strip().lower()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
 
 
 def set_seed(seed: int) -> None:
@@ -48,6 +64,13 @@ def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def seen_ids(path: Path) -> set[str]:
     out: set[str] = set()
     for row in read_jsonl(path):
@@ -65,6 +88,29 @@ def sanitize_text(text: str) -> str:
     return out
 
 
+def clean_text_for_mining(text: str) -> str:
+    """Remove debug artifacts and normalize whitespace while preserving technical tokens.
+
+    This intentionally avoids punctuation-stripping so tokens like `SE(3)`, `O(n log n)`,
+    and `k-space` remain intact.
+    """
+    return sanitize_text(text)
+
+
+def remove_debug_markers(text: str, debug_terms: set[str] | None = None) -> str:
+    out = sanitize_text(text)
+    terms = {t.lower() for t in (debug_terms or set())}
+    if not terms:
+        return out
+    low = out.lower()
+    for t in terms:
+        if not t:
+            continue
+        low = low.replace(t, " ")
+    low = WHITESPACE_RE.sub(" ", low).strip()
+    return low
+
+
 def english_like(text: str) -> bool:
     if not text:
         return False
@@ -78,3 +124,10 @@ def english_like(text: str) -> bool:
 def normalize_for_vectorizer(title: str, abstract: str) -> str:
     text = sanitize_text(f"{title} {abstract}")
     return text.lower()
+
+
+def count_by(rows: list[dict[str, Any]], key: str) -> Counter[str]:
+    c: Counter[str] = Counter()
+    for r in rows:
+        c[str(r.get(key, ""))] += 1
+    return c

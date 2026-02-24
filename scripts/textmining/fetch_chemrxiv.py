@@ -8,13 +8,9 @@ from typing import Any
 import requests
 
 from common import append_jsonl, seen_ids
+from diagnose_chemrxiv import run_diagnostics
 
-API_URL = "https://chemrxiv.org/engage/chemrxiv/public-api/v1/items"
-PAGINATION_CANDIDATES = [
-    ("offset", "limit"),
-    ("skip", "limit"),
-    ("page", "size"),
-]
+API_URL = "http://chemrxiv.org/engage/chemrxiv/public-api/v1/items"
 
 
 def extract_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -24,44 +20,38 @@ def extract_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def first_item_key(items: list[dict[str, Any]]) -> str:
-    if not items:
-        return ""
-    it = items[0]
-    return str(it.get("id") or it.get("itemId") or it.get("doi") or it.get("slug") or "")
-
-
-def probe_pagination(session: requests.Session, base_params: dict[str, Any], timeout: int) -> tuple[str, str, int]:
-    resp = session.get(API_URL, params=base_params, timeout=timeout)
-    resp.raise_for_status()
-    base_payload = resp.json()
-    base_items = extract_items(base_payload)
-    if not base_items:
-        raise RuntimeError("ChemRxiv returned no items on first request.")
-
-    base_first = first_item_key(base_items)
-    page_size = len(base_items)
-
-    for a, b in PAGINATION_CANDIDATES:
-        p2 = dict(base_params)
-        if (a, b) == ("page", "size"):
-            p2[a] = 2
-            p2[b] = page_size
-        else:
-            p2[a] = page_size
-            p2[b] = page_size
-
-        r2 = session.get(API_URL, params=p2, timeout=timeout)
-        if r2.status_code != 200:
-            continue
-        items2 = extract_items(r2.json())
-        if not items2:
-            continue
-        second_first = first_item_key(items2)
-        if second_first and second_first != base_first:
-            return a, b, page_size
-
-    raise RuntimeError("Unable to autodetect ChemRxiv pagination parameters.")
+def request_json(
+    session: requests.Session,
+    params: dict[str, Any],
+    timeout: int,
+    max_retries: int,
+    backoff_sec: float,
+    verbose: bool,
+) -> dict[str, Any]:
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = session.get(API_URL, params=params, timeout=timeout)
+            if verbose:
+                print(f"GET {resp.url} -> {resp.status_code}")
+            if resp.status_code == 403:
+                raise RuntimeError(
+                    "ChemRxiv API returned 403 (likely blocked or deprecated). "
+                    "Run diagnostics via: python scripts/textmining/diagnose_chemrxiv.py"
+                )
+            if resp.status_code >= 500 or resp.status_code == 429:
+                raise requests.HTTPError(f"retryable_status:{resp.status_code}", response=resp)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise
+            last_exc = exc
+            if attempt >= max_retries:
+                break
+            time.sleep(backoff_sec * (2**attempt))
+    assert last_exc is not None
+    raise last_exc
 
 
 def normalize_categories(item: dict[str, Any]) -> list[str]:
@@ -113,11 +103,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch ChemRxiv metadata/abstracts to JSONL")
     parser.add_argument("--domain", default="CCE")
     parser.add_argument("--max-results", type=int, default=5000)
+    parser.add_argument("--page-size", type=int, default=50)
     parser.add_argument("--sleep-sec", type=float, default=0.8)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--category-filter", action="append", default=[])
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--max-retries", type=int, default=4)
+    parser.add_argument("--backoff-sec", type=float, default=1.0)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--out", default="")
+    parser.add_argument("--diagnose", action="store_true", help="Run ChemRxiv diagnostics and exit")
+    parser.add_argument("--diagnose-out", default="", help="Optional path for diagnosis markdown output")
     args = parser.parse_args()
+
+    if args.diagnose:
+        jsonl_path, md_path, conclusion = run_diagnostics(out_md=args.diagnose_out or None, timeout=args.timeout)
+        print(f"ChemRxiv diagnosis complete: {md_path}")
+        print(f"Raw request metadata: {jsonl_path}")
+        print(f"Conclusion: {conclusion}")
+        return
+
+    if not args.out:
+        raise SystemExit("--out is required unless --diagnose is used")
 
     out_path = Path(args.out)
     existing = seen_ids(out_path)
@@ -125,38 +131,29 @@ def main() -> None:
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": "SciBabel-TextMining/1.0 (+https://github.com/kang-minhyuk/SciBabel)",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "http://chemrxiv.org/engage/chemrxiv/public-dashboard",
+            "Origin": "http://chemrxiv.org",
+            "Connection": "keep-alive",
         }
     )
-    base_params: dict[str, Any] = {}
-
-    try:
-        p_a, p_b, page_size = probe_pagination(session, base_params, args.timeout)
-    except requests.HTTPError as exc:
-        status = getattr(exc.response, "status_code", None)
-        if status == 403:
-            print("WARN: ChemRxiv API returned 403 Forbidden. Skipping ChemRxiv fetch in this run.")
-            print(f"wrote=0 out={out_path}")
-            return
-        raise
-    except RuntimeError as exc:
-        raise RuntimeError(f"ChemRxiv pagination detection failed: {exc}")
 
     written = 0
-    page_idx = 0
+    offset = 0
+    page_size = max(1, int(args.page_size))
     while written < args.max_results:
-        params = dict(base_params)
-        if (p_a, p_b) == ("page", "size"):
-            params[p_a] = page_idx + 1
-            params[p_b] = page_size
-        else:
-            params[p_a] = page_idx * page_size
-            params[p_b] = page_size
+        params = {"limit": page_size, "skip": offset}
 
-        resp = session.get(API_URL, params=params, timeout=args.timeout)
-        resp.raise_for_status()
-        payload = resp.json()
+        payload = request_json(
+            session=session,
+            params=params,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+            backoff_sec=args.backoff_sec,
+            verbose=args.verbose,
+        )
         items = extract_items(payload)
         if not items:
             break
@@ -176,12 +173,12 @@ def main() -> None:
             append_jsonl(out_path, rows)
             written += len(rows)
 
-        page_idx += 1
+        offset += page_size
         if len(items) < page_size:
             break
         time.sleep(max(0.0, args.sleep_sec))
 
-    print(f"pagination={p_a}/{p_b} page_size={page_size}")
+    print(f"pagination=skip/limit page_size={page_size}")
     print(f"wrote={written} out={out_path}")
 
 
