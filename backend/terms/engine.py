@@ -46,11 +46,6 @@ class TermAnnotationEngine:
                 + ", ".join(str(p) for p in missing)
                 + ". Run make textmining-all to generate local mining assets."
             )
-        if not self.corpus_parquet.exists() and not self.corpus_jsonl.exists():
-            raise AnnotationArtifactsMissing(
-                "Missing local corpus (data/processed/corpus.parquet or corpus.jsonl). "
-                "Run make build-corpus (or make textmining-all)."
-            )
 
         self.lexicon_by_domain = self._load_lexicon(self.lexicon_path)
         self.all_phrases = sorted({p for arr in self.lexicon_by_domain.values() for p in arr}, key=len, reverse=True)
@@ -111,9 +106,17 @@ class TermAnnotationEngine:
 
     def _load_corpus(self) -> pd.DataFrame:
         if self.corpus_parquet.exists():
-            df = pd.read_parquet(self.corpus_parquet)
-        else:
+            try:
+                df = pd.read_parquet(self.corpus_parquet)
+            except Exception:
+                if self.corpus_jsonl.exists():
+                    df = pd.read_json(self.corpus_jsonl, lines=True)
+                else:
+                    df = pd.DataFrame()
+        elif self.corpus_jsonl.exists():
             df = pd.read_json(self.corpus_jsonl, lines=True)
+        else:
+            df = pd.DataFrame()
         for c in ["id", "source", "domain", "abstract", "text"]:
             if c not in df.columns:
                 df[c] = ""

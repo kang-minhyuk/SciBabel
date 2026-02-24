@@ -6,7 +6,7 @@ ARXIV_TARGET ?= 2000
 
 .PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test smoke smoke-phrases check spacy-model eval autotune diagnose \
 	test-syntax fetch-arxiv fetch-chemrxiv fetch-openalex fetch-textmining build-corpus mine-terms train-clf validate-artifacts textmining-all diagnose-chemrxiv \
-	fetch-arxiv-csm fetch-arxiv-pm fetch-openalex-chem fetch-openalex-cheme fetch-all corpus-report test-backend smoke-auto
+	fetch-arxiv-csm fetch-arxiv-pm fetch-openalex-chem fetch-openalex-cheme fetch-all corpus-report test-backend smoke-auto build-artifacts check-startup
 
 setup:
 	python3 -m pip install --upgrade pip
@@ -61,6 +61,9 @@ smoke-auto:
 	done; \
 	curl -sf http://127.0.0.1:8000/health >/dev/null; \
 	cd $(ROOT) && python3 scripts/eval/smoke_auto_source.py --api-base http://127.0.0.1:8000
+
+check-startup:
+	cd $(ROOT) && python3 scripts/eval/smoke_render_startup.py
 
 spacy-model:
 	python3 -m spacy download en_core_web_sm
@@ -120,6 +123,9 @@ fetch-textmining:
 
 build-corpus:
 	python3 scripts/textmining/build_corpus.py --config configs/textmining/domains.yaml --out-full data/processed/corpus_full.parquet --out-balanced data/processed/corpus_balanced.parquet --diagnostics-out reports/textmining/corpus_scale_report.md
+
+build-artifacts:
+	python3 scripts/textmining/build_artifacts.py --config configs/textmining/domains.yaml
 
 corpus-report:
 	python3 scripts/textmining/corpus_report.py --corpus data/processed/corpus_full.parquet --out reports/textmining/corpus_scale_report.md

@@ -38,9 +38,14 @@ class _DummyDetector:
         }
 
 
+class _DummyResources:
+    annotation_engine = _DummyEngine()
+    source_detector = _DummyDetector()
+    explain_client = None
+
+
 def test_annotate_auto_includes_source_metadata(monkeypatch) -> None:
-    monkeypatch.setattr(app_module, "_ensure_annotation_ready", lambda: _DummyEngine())
-    monkeypatch.setattr(app_module, "_ensure_source_detector", lambda: _DummyDetector())
+    monkeypatch.setattr(app_module, "get_resources", lambda load_explain=False: _DummyResources())
 
     client = TestClient(app_module.app)
     resp = client.post(

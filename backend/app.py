@@ -4,8 +4,6 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
-import sys
 import time
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +14,7 @@ import hashlib
 import joblib
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -24,11 +23,9 @@ from gemini_client import generate_with_gemini
 from gpt_client import generate_with_gpt
 from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
-from semantic import get_semantic_mode, init_semantic_model, semantic_similarity
-from llm.fake_client import FakeExplainClient
-from llm.openai_client import ExplainRequest, OpenAIExplainClient
-from domain_detect import SourceDetector
-from terms.engine import AnnotationArtifactsMissing, TermAnnotationEngine
+from semantic import get_semantic_mode, semantic_similarity
+from llm.openai_client import ExplainRequest
+from resources import ArtifactsMissingError, check_ready, get_resources
 from term_strategy import (
     TermStrategy,
     TermStrategyEngine,
@@ -161,9 +158,6 @@ term_strategy_engine: TermStrategyEngine | None = None
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
 semantic_enabled: bool = False
-annotation_engine: TermAnnotationEngine | None = None
-explain_client: OpenAIExplainClient | FakeExplainClient | None = None
-source_detector: SourceDetector | None = None
 
 
 def _init_feedback_db() -> None:
@@ -189,42 +183,21 @@ def _init_feedback_db() -> None:
         conn.close()
 
 
-def _load_annotation_engine() -> None:
-    global annotation_engine
-    src_th = float(os.getenv("UNFAMILIAR_SRC_THRESHOLD", "0.35"))
-    tgt_th = float(os.getenv("UNFAMILIAR_TGT_THRESHOLD", "0.45"))
-    analog_th = float(os.getenv("ANALOG_SIM_THRESHOLD", "0.20"))
-    annotation_engine = TermAnnotationEngine(
-        root=ROOT,
-        src_threshold=src_th,
-        tgt_threshold=tgt_th,
-        analog_threshold=analog_th,
+ARTIFACT_HINT = (
+    "Run make textmining-all locally and upload artifacts, "
+    "or run scripts/textmining/build_artifacts.py"
+)
+
+
+def _artifacts_missing_response(missing: list[str]) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "artifacts_missing",
+            "missing": missing,
+            "hint": ARTIFACT_HINT,
+        },
     )
-
-
-def _load_explain_client() -> None:
-    global explain_client
-    if os.getenv("SCIBABEL_FAKE_LLM", "0") == "1":
-        explain_client = FakeExplainClient()
-        return
-    explain_client = OpenAIExplainClient(db_path=EXPLAIN_CACHE_DB)
-
-
-def _load_source_detector() -> None:
-    global source_detector
-    source_detector = SourceDetector(model_path=MODEL_PATH)
-
-
-def _ensure_source_detector() -> SourceDetector:
-    global source_detector
-    if source_detector is None:
-        try:
-            _load_source_detector()
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Source detector unavailable: {exc}") from exc
-    if source_detector is None:
-        raise HTTPException(status_code=503, detail="Source detector unavailable")
-    return source_detector
 
 
 def _generate_with_provider(prompt: str, temperature: float, top_p: float) -> str:
@@ -239,48 +212,17 @@ def _generate_with_provider(prompt: str, temperature: float, top_p: float) -> st
 def _load_artifacts() -> None:
     global clf, lexicon_by_domain, term_log_odds, term_strategy_engine
 
-    if not MODEL_PATH.exists() or not LEXICON_PATH.exists():
-        sample_corpus = ROOT / "data" / "processed" / "sample_corpus.jsonl"
-        if not sample_corpus.exists():
-            raise FileNotFoundError(
-                f"Missing sample corpus at {sample_corpus}; cannot bootstrap artifacts."
-            )
-
-        # Bootstrap lightweight artifacts at runtime for first deploy.
-        subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "03_mine_terms.py"),
-                "--corpus",
-                str(sample_corpus),
-                "--lexicon-out",
-                str(LEXICON_PATH),
-                "--term-stats-out",
-                str(ROOT / "data" / "processed" / "term_stats.csv"),
-                "--top-n",
-                "120",
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "04_train_domain_classifier.py"),
-                "--corpus",
-                str(sample_corpus),
-                "--model-out",
-                str(MODEL_PATH),
-            ],
-            check=True,
-        )
-
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
-            f"Missing classifier at {MODEL_PATH}. Run scripts/04_train_domain_classifier.py first."
+            f"Missing classifier at {MODEL_PATH}. {ARTIFACT_HINT}."
         )
     if not LEXICON_PATH.exists():
         raise FileNotFoundError(
-            f"Missing lexicon at {LEXICON_PATH}. Run scripts/03_mine_terms.py first."
+            f"Missing lexicon at {LEXICON_PATH}. {ARTIFACT_HINT}."
+        )
+    if not TERM_STATS_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing term stats at {TERM_STATS_PATH}. {ARTIFACT_HINT}."
         )
 
     clf = joblib.load(MODEL_PATH)
@@ -403,74 +345,27 @@ def _sanitize_output_text(text: str) -> str:
     return out
 
 
-@app.on_event("startup")
-def startup_event() -> None:
-    global semantic_enabled
-    try:
-        _load_artifacts()
-    except Exception as exc:
-        # Delay hard failure; endpoint returns actionable message.
-        print(f"[startup] Artifact load warning: {exc}")
-
-    semantic_model_name = os.getenv("SEMANTIC_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
-    semantic_enabled = init_semantic_model(semantic_model_name)
-
-    try:
-        _load_annotation_engine()
-    except Exception as exc:
-        print(f"[startup] Annotation engine warning: {exc}")
-
-    try:
-        _load_explain_client()
-    except Exception as exc:
-        print(f"[startup] Explain client warning: {exc}")
-
-    try:
-        _load_source_detector()
-    except Exception as exc:
-        print(f"[startup] Source detector warning: {exc}")
-
-    try:
-        _init_feedback_db()
-    except Exception as exc:
-        print(f"[startup] Feedback DB warning: {exc}")
-
-
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "OK"}
 
 
-def _ensure_annotation_ready() -> TermAnnotationEngine:
-    global annotation_engine
-    if annotation_engine is None:
-        try:
-            _load_annotation_engine()
-        except AnnotationArtifactsMissing as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Annotation engine unavailable: {exc}") from exc
-    if annotation_engine is None:
-        raise HTTPException(status_code=503, detail="Annotation engine unavailable. Run make textmining-all.")
-    return annotation_engine
-
-
-def _ensure_explain_ready() -> OpenAIExplainClient | FakeExplainClient:
-    global explain_client
-    if explain_client is None:
-        try:
-            _load_explain_client()
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Explain service unavailable: {exc}") from exc
-    if explain_client is None:
-        raise HTTPException(status_code=503, detail="Explain service unavailable.")
-    return explain_client
+@app.get("/ready")
+def ready() -> dict[str, object]:
+    return check_ready()
 
 
 @app.post("/annotate")
 def annotate(payload: AnnotateRequest) -> dict[str, object]:
-    engine = _ensure_annotation_ready()
-    detector = _ensure_source_detector()
+    try:
+        resources = get_resources(load_explain=payload.include_short_explanations)
+    except ArtifactsMissingError as exc:
+        return _artifacts_missing_response(exc.missing)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Annotation engine unavailable: {exc}") from exc
+
+    engine = resources.annotation_engine
+    detector = resources.source_detector
     det = detector.detect_source(_sanitize_output_text(payload.text))
 
     src_warning = False
@@ -508,7 +403,9 @@ def annotate(payload: AnnotateRequest) -> dict[str, object]:
     )
 
     if payload.include_short_explanations:
-        client = _ensure_explain_ready()
+        client = resources.explain_client
+        if client is None:
+            raise HTTPException(status_code=503, detail="Explain service unavailable")
         for term in out.get("terms", []):
             if not isinstance(term, dict) or not term.get("flagged"):
                 continue
@@ -548,15 +445,28 @@ def detect_source(payload: dict[str, str]) -> dict[str, object]:
     text = str(payload.get("text", "")).strip()
     if len(text) < 3:
         raise HTTPException(status_code=422, detail="text is required")
-    detector = _ensure_source_detector()
+    try:
+        detector = get_resources(load_explain=False).source_detector
+    except ArtifactsMissingError as exc:
+        return _artifacts_missing_response(exc.missing)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Source detector unavailable: {exc}") from exc
     return detector.detect_source(_sanitize_output_text(text))
 
 
 @app.post("/explain")
 def explain(payload: ExplainRequestBody) -> dict[str, object]:
-    _ensure_annotation_ready()
-    client = _ensure_explain_ready()
-    detector = _ensure_source_detector()
+    try:
+        resources = get_resources(load_explain=True)
+    except ArtifactsMissingError as exc:
+        return _artifacts_missing_response(exc.missing)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Explain service unavailable: {exc}") from exc
+
+    client = resources.explain_client
+    detector = resources.source_detector
+    if client is None:
+        raise HTTPException(status_code=503, detail="Explain service unavailable")
 
     src_effective = payload.src
     if payload.src == "auto":
