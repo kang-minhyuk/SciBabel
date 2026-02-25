@@ -59,3 +59,18 @@ def test_extract_with_blank_spacy_still_returns_terms() -> None:
     items = extract_terms(text, max_terms=12)
     terms = " | ".join(str(x["term"]).lower() for x in items)
     assert "graph neural" in terms or "neural network" in terms or "distribution shift" in terms
+
+
+def test_extract_when_spacy_unavailable_uses_fallback(monkeypatch) -> None:
+    import terms.extract as ex
+
+    set_nlp(None)
+
+    def _boom():
+        raise RuntimeError("spacy unavailable")
+
+    monkeypatch.setattr(ex, "_get_nlp", _boom)
+    text = "We optimize a graph neural network with sparse regularization under distribution shift."
+    items = extract_terms(text, max_terms=12)
+    terms = " | ".join(str(x["term"]).lower() for x in items)
+    assert "graph neural" in terms or "neural network" in terms or "distribution shift" in terms

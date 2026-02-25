@@ -123,55 +123,61 @@ def _refine_span(cleaned: str, start: int, end: int) -> tuple[int, int, str]:
 
 
 def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
-    nlp = _get_nlp()
     cleaned = clean_text_for_mining(text)
-    doc = nlp(cleaned)
+    doc = None
+    try:
+        nlp = _get_nlp()
+        if nlp is not None:
+            doc = nlp(cleaned)
+    except Exception:
+        doc = None
 
     items: list[SpanTerm] = []
-    for ent in getattr(doc, "ents", []):
-        term = cleaned[ent.start_char : ent.end_char]
-        s, e, term = _refine_span(cleaned, ent.start_char, ent.end_char)
-        if _valid_candidate(term):
-            items.append(SpanTerm(term=term, start=s, end=e, source="spacy_entity"))
+    if doc is not None:
+        for ent in getattr(doc, "ents", []):
+            term = cleaned[ent.start_char : ent.end_char]
+            s, e, term = _refine_span(cleaned, ent.start_char, ent.end_char)
+            if _valid_candidate(term):
+                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_entity"))
 
-    try:
-        for nc in doc.noun_chunks:
-            if any(tok.pos_ == "VERB" for tok in nc):
+        try:
+            for nc in doc.noun_chunks:
+                if any(tok.pos_ == "VERB" for tok in nc):
+                    continue
+                if len(nc) > 0 and nc[-1].pos_ not in {"NOUN", "PROPN"}:
+                    continue
+                term = cleaned[nc.start_char : nc.end_char]
+                s, e, term = _refine_span(cleaned, nc.start_char, nc.end_char)
+                if _valid_candidate(term):
+                    items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
+        except Exception:
+            pass
+
+        for tok in doc:
+            if tok.dep_ != "compound":
                 continue
-            if len(nc) > 0 and nc[-1].pos_ not in {"NOUN", "PROPN"}:
+            left = min(tok.i, tok.head.i)
+            right = max(tok.i, tok.head.i)
+            span = doc[left : right + 1]
+            term = cleaned[span.start_char : span.end_char]
+            s, e, term = _refine_span(cleaned, span.start_char, span.end_char)
+            if _valid_candidate(term):
+                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_compound"))
+
+        # adjective+noun technical phrases (e.g., sparse attention)
+        for tok in doc:
+            if tok.dep_ != "amod":
                 continue
-            term = cleaned[nc.start_char : nc.end_char]
-            s, e, term = _refine_span(cleaned, nc.start_char, nc.end_char)
+            head = tok.head
+            if getattr(head, "pos_", "") not in {"NOUN", "PROPN"}:
+                continue
+            left = min(tok.i, head.i)
+            right = max(tok.i, head.i)
+            span = doc[left : right + 1]
+            term = cleaned[span.start_char : span.end_char]
+            s, e, term = _refine_span(cleaned, span.start_char, span.end_char)
             if _valid_candidate(term):
                 items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
-    except Exception:
-        pass
-
-    for tok in doc:
-        if tok.dep_ != "compound":
-            continue
-        left = min(tok.i, tok.head.i)
-        right = max(tok.i, tok.head.i)
-        span = doc[left : right + 1]
-        term = cleaned[span.start_char : span.end_char]
-        s, e, term = _refine_span(cleaned, span.start_char, span.end_char)
-        if _valid_candidate(term):
-            items.append(SpanTerm(term=term, start=s, end=e, source="spacy_compound"))
-
-    # adjective+noun technical phrases (e.g., sparse attention)
-    for tok in doc:
-        if tok.dep_ != "amod":
-            continue
-        head = tok.head
-        if getattr(head, "pos_", "") not in {"NOUN", "PROPN"}:
-            continue
-        left = min(tok.i, head.i)
-        right = max(tok.i, head.i)
-        span = doc[left : right + 1]
-        term = cleaned[span.start_char : span.end_char]
-        s, e, term = _refine_span(cleaned, span.start_char, span.end_char)
-        if _valid_candidate(term):
-            items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
 
     # regex technical tokens to preserve forms like SE(3)-equivariant
     for patt in TECH_PATTERNS:
