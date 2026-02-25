@@ -1,4 +1,6 @@
-from terms.extract import extract_terms
+import spacy
+
+from terms.extract import extract_terms, set_nlp
 
 
 def test_extract_no_stopword_only_terms() -> None:
@@ -49,3 +51,11 @@ def test_acceptance_sentence_has_expected_phrases() -> None:
     assert "long-range dependencies" in joined
     assert "reduce" not in terms
     assert "while" not in terms
+
+
+def test_extract_with_blank_spacy_still_returns_terms() -> None:
+    set_nlp(spacy.blank("en"))
+    text = "We optimize a graph neural network with sparse regularization under distribution shift."
+    items = extract_terms(text, max_terms=12)
+    terms = " | ".join(str(x["term"]).lower() for x in items)
+    assert "graph neural" in terms or "neural network" in terms or "distribution shift" in terms

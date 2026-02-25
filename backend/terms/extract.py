@@ -134,19 +134,18 @@ def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
         if _valid_candidate(term):
             items.append(SpanTerm(term=term, start=s, end=e, source="spacy_entity"))
 
-    if hasattr(doc, "noun_chunks"):
-        try:
-            for nc in doc.noun_chunks:
-                if any(tok.pos_ == "VERB" for tok in nc):
-                    continue
-                if len(nc) > 0 and nc[-1].pos_ not in {"NOUN", "PROPN"}:
-                    continue
-                term = cleaned[nc.start_char : nc.end_char]
-                s, e, term = _refine_span(cleaned, nc.start_char, nc.end_char)
-                if _valid_candidate(term):
-                    items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
-        except Exception:
-            pass
+    try:
+        for nc in doc.noun_chunks:
+            if any(tok.pos_ == "VERB" for tok in nc):
+                continue
+            if len(nc) > 0 and nc[-1].pos_ not in {"NOUN", "PROPN"}:
+                continue
+            term = cleaned[nc.start_char : nc.end_char]
+            s, e, term = _refine_span(cleaned, nc.start_char, nc.end_char)
+            if _valid_candidate(term):
+                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
+    except Exception:
+        pass
 
     for tok in doc:
         if tok.dep_ != "compound":
