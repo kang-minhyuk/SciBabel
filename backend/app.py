@@ -416,12 +416,16 @@ def annotate(payload: AnnotateRequest) -> dict[str, object]:
             src_warning = True
             src_warning_reason = "mismatch"
 
-    out = engine.annotate(
-        text=_sanitize_output_text(payload.text),
-        src=src_used,
-        tgt=payload.tgt,
-        max_terms=effective_max_terms,
-    )
+    text_clean = _sanitize_output_text(payload.text)
+    try:
+        out = engine.annotate(
+            text=text_clean,
+            src=src_used,
+            tgt=payload.tgt,
+            max_terms=effective_max_terms,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Annotate failed: {exc}") from exc
 
     if payload.include_short_explanations:
         client = resources.explain_client

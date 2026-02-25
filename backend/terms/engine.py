@@ -161,19 +161,27 @@ class TermAnnotationEngine:
         src_final = src_final if src_final in set(self.domains) else "CSM"
 
         t0 = time.perf_counter()
-        extracted = extract_terms(text=text, max_terms=max(16, max_terms * 3))
+        try:
+            extracted = extract_terms(text=text, max_terms=max(16, max_terms * 3))
+        except Exception as exc:
+            print(f"[annotate] extract_terms_error={exc}")
+            extracted = []
         t_extract = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        scored = score_terms(
-            extracted_terms=extracted,
-            src=src_final,
-            tgt=tgt,
-            all_domains=self.domains,
-            term_stats=self.term_stats,
-            lexicon_by_domain=self.lexicon_by_domain,
-            cfg=self.scoring_cfg,
-        )
+        try:
+            scored = score_terms(
+                extracted_terms=extracted,
+                src=src_final,
+                tgt=tgt,
+                all_domains=self.domains,
+                term_stats=self.term_stats,
+                lexicon_by_domain=self.lexicon_by_domain,
+                cfg=self.scoring_cfg,
+            )
+        except Exception as exc:
+            print(f"[annotate] score_terms_error={exc}")
+            scored = []
         t_score = time.perf_counter() - t0
 
         enriched: list[dict[str, object]] = []
@@ -184,12 +192,20 @@ class TermAnnotationEngine:
                 break
             term = str(row["term"])
             t0 = time.perf_counter()
-            analogs = self.analog.suggest(term=term, target_candidates=self.lexicon_by_domain.get(tgt, []), top_k=5)
+            try:
+                analogs = self.analog.suggest(term=term, target_candidates=self.lexicon_by_domain.get(tgt, []), top_k=5)
+            except Exception as exc:
+                print(f"[annotate] analog_suggest_error term={term!r} err={exc}")
+                analogs = []
             t_analog_total += time.perf_counter() - t0
 
             evidence_term = str(analogs[0]["candidate"]) if analogs else term
             t0 = time.perf_counter()
-            evidence = self._evidence_lookup(tgt=tgt, phrase=evidence_term, max_hits=2)
+            try:
+                evidence = self._evidence_lookup(tgt=tgt, phrase=evidence_term, max_hits=2)
+            except Exception as exc:
+                print(f"[annotate] evidence_lookup_error term={evidence_term!r} err={exc}")
+                evidence = []
             t_evidence_total += time.perf_counter() - t0
 
             row_out = dict(row)

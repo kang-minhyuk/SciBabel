@@ -50,8 +50,16 @@ def _get_nlp():
     spacy = importlib.import_module("spacy")
 
     model = os.getenv("SPACY_MODEL", "en_core_web_sm")
+    default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
+    env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
+    prefer_blank = env == "production" and os.getenv("SPACY_LOAD_MODEL_IN_PROD", "false").strip().lower() not in {"1", "true", "yes", "on"}
     try:
-        _NLP = spacy.load(model)
+        if prefer_blank:
+            _NLP = spacy.blank("en")
+            if "sentencizer" not in _NLP.pipe_names:
+                _NLP.add_pipe("sentencizer")
+        else:
+            _NLP = spacy.load(model)
     except Exception:
         _NLP = spacy.blank("en")
         if "sentencizer" not in _NLP.pipe_names:
