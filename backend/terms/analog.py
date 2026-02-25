@@ -51,7 +51,8 @@ class AnalogSuggester:
         self._generic = GENERIC_BLOCK | _load_generic_block_from_stoplist()
         self._embedder = None
 
-        env = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
+        default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
+        env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
         default_embed = "false" if env == "production" else "true"
         use_embeddings = os.getenv("ANALOG_USE_EMBEDDINGS", default_embed).strip().lower() in {"1", "true", "yes", "on"}
         if not use_embeddings:

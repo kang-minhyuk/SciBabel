@@ -38,7 +38,8 @@ class ResourceManager:
         self._bundle: ResourceBundle | None = None
         self._spacy_nlp: object | None = None
 
-        env = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
+        default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
+        env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
         self.scibabel_env = env if env in {"dev", "production"} else "dev"
         default_evidence = "false" if self.scibabel_env == "production" else "true"
         self.evidence_enabled = os.getenv("EVIDENCE_ENABLED", default_evidence).strip().lower() in {"1", "true", "yes", "on"}

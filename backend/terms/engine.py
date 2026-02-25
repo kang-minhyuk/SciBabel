@@ -34,7 +34,8 @@ class TermAnnotationEngine:
         self.model_path = root / "models" / "domain_clf.joblib"
         self.evidence_index_path = root / "data" / "processed" / "evidence_index.json"
 
-        env = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
+        default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
+        env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
         self.is_production = env == "production"
         default_evidence = "false" if self.is_production else "true"
         self.evidence_enabled = os.getenv("EVIDENCE_ENABLED", default_evidence).strip().lower() in {"1", "true", "yes", "on"}

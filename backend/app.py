@@ -161,6 +161,8 @@ semantic_enabled: bool = False
 SCIBABEL_ENV = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
 if SCIBABEL_ENV not in {"dev", "production"}:
     SCIBABEL_ENV = "dev"
+if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} and "SCIBABEL_ENV" not in os.environ:
+    SCIBABEL_ENV = "production"
 print(f"[startup] SCIBABEL_ENV={SCIBABEL_ENV}")
 
 
