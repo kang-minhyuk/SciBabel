@@ -61,7 +61,11 @@ class AnalogSuggester:
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+            allow_download = os.getenv("ANALOG_ALLOW_MODEL_DOWNLOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
+            self._embedder = SentenceTransformer(
+                "sentence-transformers/all-MiniLM-L6-v2",
+                local_files_only=not allow_download,
+            )
         except Exception:
             self._embedder = None
 
