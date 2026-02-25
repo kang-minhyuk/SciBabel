@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import time
 from pathlib import Path
 from typing import Literal
 
 import joblib
-import pandas as pd
 
 from terms.analog import AnalogSuggester
-from terms.evidence import find_evidence_snippets
 from terms.extract import extract_terms
 from terms.score import TermScoreConfig, score_terms
 
@@ -32,8 +32,12 @@ class TermAnnotationEngine:
         self.lexicon_path = root / "data" / "processed" / "domain_lexicon.json"
         self.term_stats_path = root / "data" / "processed" / "term_stats.csv"
         self.model_path = root / "models" / "domain_clf.joblib"
-        self.corpus_parquet = root / "data" / "processed" / "corpus.parquet"
-        self.corpus_jsonl = root / "data" / "processed" / "corpus.jsonl"
+        self.evidence_index_path = root / "data" / "processed" / "evidence_index.json"
+
+        env = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
+        self.is_production = env == "production"
+        default_evidence = "false" if self.is_production else "true"
+        self.evidence_enabled = os.getenv("EVIDENCE_ENABLED", default_evidence).strip().lower() in {"1", "true", "yes", "on"}
 
         missing = [
             p
@@ -50,11 +54,11 @@ class TermAnnotationEngine:
         self.lexicon_by_domain = self._load_lexicon(self.lexicon_path)
         self.all_phrases = sorted({p for arr in self.lexicon_by_domain.values() for p in arr}, key=len, reverse=True)
         self.term_stats = self._load_term_stats(self.term_stats_path)
-        self.corpus_df = self._load_corpus()
         self.clf = joblib.load(self.model_path)
         self.scoring_cfg = TermScoreConfig(src_threshold=src_threshold, tgt_threshold=tgt_threshold)
         self.analog = AnalogSuggester(analog_sim_threshold=analog_threshold)
         self.domains = sorted(self.lexicon_by_domain.keys())
+        self.evidence_index = self._load_evidence_index() if self.evidence_enabled else {}
 
     @staticmethod
     def _load_lexicon(path: Path) -> dict[str, list[str]]:
@@ -104,23 +108,41 @@ class TermAnnotationEngine:
                 stats[(d, t)] = z
         return stats
 
-    def _load_corpus(self) -> pd.DataFrame:
-        if self.corpus_parquet.exists():
-            try:
-                df = pd.read_parquet(self.corpus_parquet)
-            except Exception:
-                if self.corpus_jsonl.exists():
-                    df = pd.read_json(self.corpus_jsonl, lines=True)
-                else:
-                    df = pd.DataFrame()
-        elif self.corpus_jsonl.exists():
-            df = pd.read_json(self.corpus_jsonl, lines=True)
-        else:
-            df = pd.DataFrame()
-        for c in ["id", "source", "domain", "abstract", "text"]:
-            if c not in df.columns:
-                df[c] = ""
-        return df[["id", "source", "domain", "abstract", "text"]].copy()
+    def _load_evidence_index(self) -> dict[str, list[dict[str, str]]]:
+        if not self.evidence_index_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.evidence_index_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, list[dict[str, str]]] = {}
+            for key, val in raw.items():
+                if not isinstance(val, list):
+                    continue
+                cleaned_rows: list[dict[str, str]] = []
+                for row in val:
+                    if not isinstance(row, dict):
+                        continue
+                    cleaned_rows.append(
+                        {
+                            "snippet": str(row.get("snippet", "")),
+                            "doc_id": str(row.get("doc_id", "")),
+                            "source": str(row.get("source", "")),
+                        }
+                    )
+                out[str(key).strip().lower()] = cleaned_rows
+            return out
+        except Exception:
+            return {}
+
+    def _evidence_lookup(self, tgt: str, phrase: str, max_hits: int = 2) -> list[dict[str, str]]:
+        if not self.evidence_enabled:
+            return []
+        key = f"{tgt.upper()}::{phrase.strip().lower()}"
+        rows = self.evidence_index.get(key, [])
+        if not rows:
+            return []
+        return rows[:max(0, int(max_hits))]
 
     def predict_src(self, text: str) -> tuple[str | None, float | None]:
         labels = list(getattr(self.clf, "classes_", []))
@@ -131,11 +153,17 @@ class TermAnnotationEngine:
         return str(labels[idx]), float(probs[idx])
 
     def annotate(self, text: str, src: str, tgt: Domain, max_terms: int = 8) -> dict[str, object]:
+        t_all = time.perf_counter()
+
         predicted_src, pred_conf = self.predict_src(text)
         src_final = predicted_src if src == "auto" and predicted_src else src
         src_final = src_final if src_final in set(self.domains) else "CSM"
 
+        t0 = time.perf_counter()
         extracted = extract_terms(text=text, max_terms=max(16, max_terms * 3))
+        t_extract = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         scored = score_terms(
             extracted_terms=extracted,
             src=src_final,
@@ -145,16 +173,26 @@ class TermAnnotationEngine:
             lexicon_by_domain=self.lexicon_by_domain,
             cfg=self.scoring_cfg,
         )
+        t_score = time.perf_counter() - t0
 
         enriched: list[dict[str, object]] = []
+        t_analog_total = 0.0
+        t_evidence_total = 0.0
         for row in scored:
             if len(enriched) >= max_terms:
                 break
             term = str(row["term"])
+            t0 = time.perf_counter()
             analogs = self.analog.suggest(term=term, target_candidates=self.lexicon_by_domain.get(tgt, []), top_k=5)
+            t_analog_total += time.perf_counter() - t0
+
             evidence_term = str(analogs[0]["candidate"]) if analogs else term
-            evidence = find_evidence_snippets(self.corpus_df, tgt=tgt, phrase=evidence_term, max_hits=2)
+            t0 = time.perf_counter()
+            evidence = self._evidence_lookup(tgt=tgt, phrase=evidence_term, max_hits=2)
+            t_evidence_total += time.perf_counter() - t0
+
             row_out = dict(row)
+            row_out["term"] = str(row_out.get("term", "")).replace("(native=0.00)", "").replace("(domain-specific concept)", "").strip()
             row_out["analogs"] = analogs
             row_out["evidence"] = evidence
             row_out["explain_available"] = bool(row_out.get("flagged", False))
@@ -167,5 +205,12 @@ class TermAnnotationEngine:
             "predicted_src_confidence": pred_conf,
             "src_warning": src_warning,
             "src_effective": src_final,
+            "_timings": {
+                "extract_terms_sec": round(t_extract, 4),
+                "score_terms_sec": round(t_score, 4),
+                "analog_search_sec": round(t_analog_total, 4),
+                "evidence_sec": round(t_evidence_total, 4),
+                "total_sec": round(time.perf_counter() - t_all, 4),
+            },
             "terms": enriched,
         }

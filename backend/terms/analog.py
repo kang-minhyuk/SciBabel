@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 from pathlib import Path
 
 GENERIC_BLOCK = {
@@ -49,6 +50,12 @@ class AnalogSuggester:
         self.analog_sim_threshold = analog_sim_threshold
         self._generic = GENERIC_BLOCK | _load_generic_block_from_stoplist()
         self._embedder = None
+
+        env = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
+        default_embed = "false" if env == "production" else "true"
+        use_embeddings = os.getenv("ANALOG_USE_EMBEDDINGS", default_embed).strip().lower() in {"1", "true", "yes", "on"}
+        if not use_embeddings:
+            return
 
         try:
             from sentence_transformers import SentenceTransformer

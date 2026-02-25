@@ -25,7 +25,7 @@ from prompts import build_prompt, get_prompt_action_names
 from reward import compute_reward
 from semantic import get_semantic_mode, semantic_similarity
 from llm.openai_client import ExplainRequest
-from resources import ArtifactsMissingError, check_ready, get_resources
+from resources import ArtifactsMissingError, check_ready, get_resources, get_spacy
 from term_strategy import (
     TermStrategy,
     TermStrategyEngine,
@@ -158,6 +158,10 @@ term_strategy_engine: TermStrategyEngine | None = None
 bandit = EpsilonGreedyBandit(actions=get_prompt_action_names(), epsilon=0.2)
 _response_cache: dict[str, tuple[float, TranslateResponse]] = {}
 semantic_enabled: bool = False
+SCIBABEL_ENV = os.getenv("SCIBABEL_ENV", "dev").strip().lower()
+if SCIBABEL_ENV not in {"dev", "production"}:
+    SCIBABEL_ENV = "dev"
+print(f"[startup] SCIBABEL_ENV={SCIBABEL_ENV}")
 
 
 def _init_feedback_db() -> None:
@@ -352,17 +356,32 @@ def health() -> dict[str, str]:
 
 @app.get("/ready")
 def ready() -> dict[str, object]:
-    return check_ready()
+    t0 = time.perf_counter()
+    out = check_ready()
+    print(f"[timing] ready_total_sec={round(time.perf_counter() - t0, 4)} ready={out.get('ready')}")
+    return out
 
 
 @app.post("/annotate")
 def annotate(payload: AnnotateRequest) -> dict[str, object]:
+    t_all = time.perf_counter()
+    effective_max_terms = int(payload.max_terms)
+    if SCIBABEL_ENV == "production":
+        cap = int(os.getenv("PRODUCTION_MAX_TERMS", "6"))
+        effective_max_terms = max(1, min(effective_max_terms, cap))
+
+    t0 = time.perf_counter()
     try:
         resources = get_resources(load_explain=payload.include_short_explanations)
     except ArtifactsMissingError as exc:
         return _artifacts_missing_response(exc.missing)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Annotation engine unavailable: {exc}") from exc
+    t_load = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    _ = get_spacy()
+    t_spacy = time.perf_counter() - t0
 
     engine = resources.annotation_engine
     detector = resources.source_detector
@@ -399,7 +418,7 @@ def annotate(payload: AnnotateRequest) -> dict[str, object]:
         text=_sanitize_output_text(payload.text),
         src=src_used,
         tgt=payload.tgt,
-        max_terms=payload.max_terms,
+        max_terms=effective_max_terms,
     )
 
     if payload.include_short_explanations:
@@ -426,7 +445,7 @@ def annotate(payload: AnnotateRequest) -> dict[str, object]:
             except Exception:
                 term["short_explanation"] = ""
 
-    return {
+    response = {
         "predicted_src": det.get("predicted_src"),
         "predicted_src_confidence": det.get("confidence"),
         "predicted_src_probs": det.get("probs", {}),
@@ -438,6 +457,23 @@ def annotate(payload: AnnotateRequest) -> dict[str, object]:
         "suggested_src": det.get("predicted_src"),
         "terms": out.get("terms", []),
     }
+
+    step_t = out.get("_timings", {}) if isinstance(out, dict) else {}
+    print(
+        "[timing] annotate",
+        {
+            "env": SCIBABEL_ENV,
+            "load_light_resources_sec": round(t_load, 4),
+            "spacy_load_sec": round(t_spacy, 4),
+            "extract_terms_sec": step_t.get("extract_terms_sec", 0.0),
+            "score_terms_sec": step_t.get("score_terms_sec", 0.0),
+            "analog_search_sec": step_t.get("analog_search_sec", 0.0),
+            "evidence_sec": step_t.get("evidence_sec", 0.0),
+            "total_sec": round(time.perf_counter() - t_all, 4),
+            "max_terms": effective_max_terms,
+        },
+    )
+    return response
 
 
 @app.post("/detect_source")

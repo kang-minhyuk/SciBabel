@@ -36,6 +36,11 @@ class SpanTerm:
     source: str
 
 
+def set_nlp(nlp_obj: object) -> None:
+    global _NLP
+    _NLP = nlp_obj
+
+
 def _get_nlp():
     global _NLP
     if _NLP is not None:

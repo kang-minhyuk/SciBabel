@@ -6,7 +6,7 @@ ARXIV_TARGET ?= 2000
 
 .PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test smoke smoke-phrases check spacy-model eval autotune diagnose \
 	test-syntax fetch-arxiv fetch-chemrxiv fetch-openalex fetch-textmining build-corpus mine-terms train-clf validate-artifacts textmining-all diagnose-chemrxiv \
-	fetch-arxiv-csm fetch-arxiv-pm fetch-openalex-chem fetch-openalex-cheme fetch-all corpus-report test-backend smoke-auto build-artifacts check-startup
+	fetch-arxiv-csm fetch-arxiv-pm fetch-openalex-chem fetch-openalex-cheme fetch-all corpus-report test-backend smoke-auto build-artifacts check-startup smoke-render
 
 setup:
 	python3 -m pip install --upgrade pip
@@ -65,14 +65,17 @@ smoke-auto:
 check-startup:
 	cd $(ROOT) && python3 scripts/eval/smoke_render_startup.py
 
+smoke-render:
+	cd $(ROOT) && SCIBABEL_ENV=production EVIDENCE_ENABLED=false python3 scripts/eval/smoke_render_behavior.py
+
 spacy-model:
 	python3 -m spacy download en_core_web_sm
 
 smoke-phrases:
 	cd $(ROOT) && PYTHONPATH=$(BACKEND):$$PYTHONPATH python3 scripts/eval/smoke_phrase_extraction.py
 
-check: test-backend smoke-auto
-	@echo "Auto-source checks passed"
+check: test-backend smoke-render
+	@echo "Backend + render-behavior checks passed"
 
 eval:
 	python3 scripts/eval/run_eval.py --api-base http://localhost:8000 --k 4
