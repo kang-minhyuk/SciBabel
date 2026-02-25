@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -164,6 +165,11 @@ if SCIBABEL_ENV not in {"dev", "production"}:
 if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} and "SCIBABEL_ENV" not in os.environ:
     SCIBABEL_ENV = "production"
 print(f"[startup] SCIBABEL_ENV={SCIBABEL_ENV}")
+
+ANNOTATE_MAX_CONCURRENCY = max(1, int(os.getenv("ANNOTATE_MAX_CONCURRENCY", "4")))
+ANNOTATE_ACQUIRE_TIMEOUT_SEC = max(0.0, float(os.getenv("ANNOTATE_ACQUIRE_TIMEOUT_SEC", "0.1")))
+_ANNOTATE_SEMAPHORE = threading.BoundedSemaphore(ANNOTATE_MAX_CONCURRENCY)
+print(f"[startup] ANNOTATE_MAX_CONCURRENCY={ANNOTATE_MAX_CONCURRENCY}")
 
 
 def _init_feedback_db() -> None:
@@ -352,12 +358,12 @@ def _sanitize_output_text(text: str) -> str:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "OK"}
 
 
 @app.get("/ready")
-def ready() -> dict[str, object]:
+async def ready() -> dict[str, object]:
     t0 = time.perf_counter()
     out = check_ready()
     print(f"[timing] ready_total_sec={round(time.perf_counter() - t0, 4)} ready={out.get('ready')}")
@@ -366,6 +372,16 @@ def ready() -> dict[str, object]:
 
 @app.post("/annotate")
 def annotate(payload: AnnotateRequest) -> dict[str, object]:
+    acquired = _ANNOTATE_SEMAPHORE.acquire(timeout=ANNOTATE_ACQUIRE_TIMEOUT_SEC)
+    if not acquired:
+        raise HTTPException(status_code=503, detail="Annotate service busy. Please retry shortly.")
+    try:
+        return _annotate_impl(payload)
+    finally:
+        _ANNOTATE_SEMAPHORE.release()
+
+
+def _annotate_impl(payload: AnnotateRequest) -> dict[str, object]:
     t_all = time.perf_counter()
     effective_max_terms = int(payload.max_terms)
     if SCIBABEL_ENV == "production":
