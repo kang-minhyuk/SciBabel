@@ -14,21 +14,21 @@ def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def _domain_z(term_stats: dict[tuple[str, str], float], domain: str, term: str) -> float:
-    return float(term_stats.get((domain, term.lower().strip()), 0.0))
+def _domain_z(term_stats: dict[str, dict[str, float]], domain: str, term: str) -> float:
+    return float(term_stats.get(domain, {}).get(term.lower().strip(), 0.0))
 
 
-def _familiarity(term: str, tgt: str, term_stats: dict[tuple[str, str], float], lexicon_by_domain: dict[str, list[str]]) -> float:
+def _familiarity(term: str, tgt: str, term_stats: dict[str, dict[str, float]], lexicon_lower_by_domain: dict[str, set[str]]) -> float:
     z = _domain_z(term_stats, tgt, term)
     if z != 0:
         return float(_sigmoid(z / 2.0))
-    return 0.6 if term.lower() in {t.lower() for t in lexicon_by_domain.get(tgt, [])} else 0.1
+    return 0.6 if term.lower() in lexicon_lower_by_domain.get(tgt, set()) else 0.1
 
 
-def _distinctiveness(term: str, src: str, tgt: str, all_domains: list[str], term_stats: dict[tuple[str, str], float], lexicon_by_domain: dict[str, list[str]]) -> float:
+def _distinctiveness(term: str, src: str, tgt: str, all_domains: list[str], term_stats: dict[str, dict[str, float]], lexicon_lower_by_domain: dict[str, set[str]]) -> float:
     src_z = _domain_z(term_stats, src, term)
     if src_z == 0:
-        src_z = 0.8 if term.lower() in {t.lower() for t in lexicon_by_domain.get(src, [])} else 0.0
+        src_z = 0.8 if term.lower() in lexicon_lower_by_domain.get(src, set()) else 0.0
     other = [d for d in all_domains if d != src]
     max_other = max((_domain_z(term_stats, d, term) for d in other), default=0.0)
     raw = src_z - max_other
@@ -40,19 +40,24 @@ def score_terms(
     src: str,
     tgt: str,
     all_domains: list[str],
-    term_stats: dict[tuple[str, str], float],
+    term_stats: dict[str, dict[str, float]],
     lexicon_by_domain: dict[str, list[str]],
+    lexicon_lower_by_domain: dict[str, set[str]] | None = None,
     cfg: TermScoreConfig | None = None,
 ) -> list[dict[str, object]]:
     cfg = cfg or TermScoreConfig()
+    lexicon_lower = lexicon_lower_by_domain or {
+        d: {t.lower() for t in terms}
+        for d, terms in lexicon_by_domain.items()
+    }
     out: list[dict[str, object]] = []
 
     for item in extracted_terms:
         term = str(item.get("term", "")).strip()
         if not term:
             continue
-        fam_tgt = _familiarity(term, tgt, term_stats, lexicon_by_domain)
-        dist_src = _distinctiveness(term, src, tgt, all_domains, term_stats, lexicon_by_domain)
+        fam_tgt = _familiarity(term, tgt, term_stats, lexicon_lower)
+        dist_src = _distinctiveness(term, src, tgt, all_domains, term_stats, lexicon_lower)
         flagged = bool(dist_src >= cfg.src_threshold and fam_tgt <= cfg.tgt_threshold)
 
         reasons: list[str] = []

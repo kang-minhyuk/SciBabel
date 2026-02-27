@@ -10,8 +10,14 @@ services:
         value: production
       - key: EVIDENCE_ENABLED
         value: "false"
+      - key: YAKE_ENABLED
+        value: "false"
       - key: ANALOG_USE_EMBEDDINGS
         value: "false"
+      - key: ANALOG_MAX_CANDIDATES
+        value: "300"
+      - key: ANALOG_MAX_TERMS
+        value: "6"
       - key: SPACY_LOAD_MODEL_IN_PROD
         value: "false"
       - key: PRODUCTION_MAX_TERMS

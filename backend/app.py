@@ -376,12 +376,23 @@ def annotate(payload: AnnotateRequest) -> dict[str, object]:
     if not acquired:
         raise HTTPException(status_code=503, detail="Annotate service busy. Please retry shortly.")
     try:
-        return _annotate_impl(payload)
+        return _annotate_impl(payload, include_profile=False)
     finally:
         _ANNOTATE_SEMAPHORE.release()
 
 
-def _annotate_impl(payload: AnnotateRequest) -> dict[str, object]:
+@app.post("/profile_annotate")
+def profile_annotate(payload: AnnotateRequest) -> dict[str, object]:
+    acquired = _ANNOTATE_SEMAPHORE.acquire(timeout=ANNOTATE_ACQUIRE_TIMEOUT_SEC)
+    if not acquired:
+        raise HTTPException(status_code=503, detail="Annotate service busy. Please retry shortly.")
+    try:
+        return _annotate_impl(payload, include_profile=True)
+    finally:
+        _ANNOTATE_SEMAPHORE.release()
+
+
+def _annotate_impl(payload: AnnotateRequest, include_profile: bool = False) -> dict[str, object]:
     t_all = time.perf_counter()
     effective_max_terms = int(payload.max_terms)
     if SCIBABEL_ENV == "production":
@@ -481,20 +492,35 @@ def _annotate_impl(payload: AnnotateRequest) -> dict[str, object]:
     }
 
     step_t = out.get("_timings", {}) if isinstance(out, dict) else {}
+    timings = {
+        "load_light_resources": round(t_load, 4),
+        "get_spacy": round(t_spacy, 4),
+        "spacy_extract": float(step_t.get("spacy_extract_sec", 0.0)),
+        "yake_extract": float(step_t.get("yake_extract_sec", 0.0)),
+        "merge_dedupe": float(step_t.get("merge_dedupe_sec", 0.0)),
+        "score_terms": float(step_t.get("score_terms_sec", 0.0)),
+        "analog_suggest": float(step_t.get("analog_search_sec", 0.0)),
+        "evidence": float(step_t.get("evidence_sec", 0.0)),
+        "total": round(time.perf_counter() - t_all, 4),
+    }
     print(
         "[timing] annotate",
         {
             "env": SCIBABEL_ENV,
-            "load_light_resources_sec": round(t_load, 4),
-            "spacy_load_sec": round(t_spacy, 4),
-            "extract_terms_sec": step_t.get("extract_terms_sec", 0.0),
-            "score_terms_sec": step_t.get("score_terms_sec", 0.0),
-            "analog_search_sec": step_t.get("analog_search_sec", 0.0),
-            "evidence_sec": step_t.get("evidence_sec", 0.0),
-            "total_sec": round(time.perf_counter() - t_all, 4),
+            "load_light_resources": timings["load_light_resources"],
+            "get_spacy": timings["get_spacy"],
+            "spacy_extract": timings["spacy_extract"],
+            "yake_extract": timings["yake_extract"],
+            "merge_dedupe": timings["merge_dedupe"],
+            "score_terms": timings["score_terms"],
+            "analog_suggest": timings["analog_suggest"],
+            "evidence": timings["evidence"],
+            "total": timings["total"],
             "max_terms": effective_max_terms,
         },
     )
+    if include_profile:
+        response["timings"] = timings
     return response
 
 

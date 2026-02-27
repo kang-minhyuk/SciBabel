@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 
 from terms.clean import clean_text_for_mining
@@ -16,6 +18,7 @@ _SOURCE_RANK = {
 }
 
 _NLP = None
+_NLP_LOCK = threading.RLock()
 _STOP_ALL = load_all_stoplists()
 _DEBUG = load_stoplist("debug_artifacts.txt")
 _ACADEMIC = load_stoplist("academic_stopwords.txt")
@@ -45,26 +48,36 @@ def _get_nlp():
     global _NLP
     if _NLP is not None:
         return _NLP
-    import importlib
+    with _NLP_LOCK:
+        if _NLP is not None:
+            return _NLP
+        import importlib
 
-    spacy = importlib.import_module("spacy")
+        spacy = importlib.import_module("spacy")
 
-    model = os.getenv("SPACY_MODEL", "en_core_web_sm")
-    default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
-    env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
-    prefer_blank = env == "production" and os.getenv("SPACY_LOAD_MODEL_IN_PROD", "false").strip().lower() not in {"1", "true", "yes", "on"}
-    try:
-        if prefer_blank:
+        model = os.getenv("SPACY_MODEL", "en_core_web_sm")
+        default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
+        env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
+        prefer_blank = env == "production" and os.getenv("SPACY_LOAD_MODEL_IN_PROD", "false").strip().lower() not in {"1", "true", "yes", "on"}
+        try:
+            if prefer_blank:
+                _NLP = spacy.blank("en")
+                if "sentencizer" not in _NLP.pipe_names:
+                    _NLP.add_pipe("sentencizer")
+            else:
+                _NLP = spacy.load(model)
+        except Exception:
             _NLP = spacy.blank("en")
             if "sentencizer" not in _NLP.pipe_names:
                 _NLP.add_pipe("sentencizer")
-        else:
-            _NLP = spacy.load(model)
-    except Exception:
-        _NLP = spacy.blank("en")
-        if "sentencizer" not in _NLP.pipe_names:
-            _NLP.add_pipe("sentencizer")
-    return _NLP
+        return _NLP
+
+
+def _is_yake_enabled() -> bool:
+    default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
+    env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
+    default = "false" if env == "production" else "true"
+    return os.getenv("YAKE_ENABLED", default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_phrase(text: str) -> str:
@@ -271,16 +284,39 @@ def _dedup_merge(candidates: list[SpanTerm]) -> list[SpanTerm]:
     return uniq
 
 
-def extract_terms(text: str, max_terms: int = 12) -> list[dict[str, object]]:
-    if not text.strip():
-        return []
+def extract_terms(text: str, max_terms: int = 12, yake_enabled: bool | None = None) -> list[dict[str, object]]:
+    return extract_terms_profiled(text=text, max_terms=max_terms, yake_enabled=yake_enabled)["terms"]
 
+
+def extract_terms_profiled(text: str, max_terms: int = 12, yake_enabled: bool | None = None) -> dict[str, object]:
+    if not text.strip():
+        return {
+            "terms": [],
+            "timings": {
+                "spacy_extract_sec": 0.0,
+                "yake_extract_sec": 0.0,
+                "merge_dedupe_sec": 0.0,
+            },
+        }
+
+    t0 = time.perf_counter()
     spacy_terms = _collect_spacy_candidates(text)
-    yake_terms = [
-        SpanTerm(term=str(x["term"]), start=int(x["start"]), end=int(x["end"]), source="yake")
-        for x in extract_yake_keyphrases_with_spans(text, top_k=20)
-    ]
+    t_spacy = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    use_yake = _is_yake_enabled() if yake_enabled is None else bool(yake_enabled)
+    if use_yake:
+        yake_terms = [
+            SpanTerm(term=str(x["term"]), start=int(x["start"]), end=int(x["end"]), source="yake")
+            for x in extract_yake_keyphrases_with_spans(text, top_k=20)
+        ]
+    else:
+        yake_terms = []
+    t_yake = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     merged = _dedup_merge(spacy_terms + yake_terms)
+    t_merge = time.perf_counter() - t0
 
     prioritized = sorted(
         merged,
@@ -288,7 +324,14 @@ def extract_terms(text: str, max_terms: int = 12) -> list[dict[str, object]]:
     )[:max_terms]
     prioritized.sort(key=lambda s: s.start)
 
-    return [{"term": s.term, "start": int(s.start), "end": int(s.end), "source": s.source} for s in prioritized]
+    return {
+        "terms": [{"term": s.term, "start": int(s.start), "end": int(s.end), "source": s.source} for s in prioritized],
+        "timings": {
+            "spacy_extract_sec": round(t_spacy, 4),
+            "yake_extract_sec": round(t_yake, 4),
+            "merge_dedupe_sec": round(t_merge, 4),
+        },
+    }
 
 
 def extract_terms_with_spans(text: str, lexicon_phrases: list[str] | None = None, max_terms: int = 24) -> list[dict[str, object]]:

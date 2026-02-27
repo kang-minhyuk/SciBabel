@@ -49,47 +49,26 @@ class AnalogSuggester:
     def __init__(self, analog_sim_threshold: float = 0.2) -> None:
         self.analog_sim_threshold = analog_sim_threshold
         self._generic = GENERIC_BLOCK | _load_generic_block_from_stoplist()
-        self._embedder = None
-
-        default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
-        env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
-        default_embed = "false" if env == "production" else "true"
-        use_embeddings = os.getenv("ANALOG_USE_EMBEDDINGS", default_embed).strip().lower() in {"1", "true", "yes", "on"}
-        if not use_embeddings:
-            return
-
+        self._rapidfuzz = None
         try:
-            from sentence_transformers import SentenceTransformer
+            from rapidfuzz import fuzz  # type: ignore
 
-            allow_download = os.getenv("ANALOG_ALLOW_MODEL_DOWNLOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
-            self._embedder = SentenceTransformer(
-                "sentence-transformers/all-MiniLM-L6-v2",
-                local_files_only=not allow_download,
-            )
+            self._rapidfuzz = fuzz
         except Exception:
-            self._embedder = None
+            self._rapidfuzz = None
 
-    def _score_candidates(self, term: str, candidates: list[str]) -> list[tuple[str, float]]:
+    def _score_candidates(self, term: str, candidates: list[str], max_candidates: int) -> list[tuple[str, float]]:
         if not candidates:
             return []
+        capped = candidates[:max(1, int(max_candidates))]
+        if self._rapidfuzz is None:
+            return [(c, _jaccard(term, c)) for c in capped]
+        return [
+            (c, (0.7 * _jaccard(term, c)) + (0.3 * (float(self._rapidfuzz.token_set_ratio(term, c)) / 100.0)))
+            for c in capped
+        ]
 
-        if self._embedder is None:
-            return [(c, _jaccard(term, c)) for c in candidates]
-
-        try:
-            import numpy as np
-
-            vecs = self._embedder.encode([term] + candidates, normalize_embeddings=True)
-            src = vecs[0]
-            out: list[tuple[str, float]] = []
-            for c, v in zip(candidates, vecs[1:]):
-                score = float(np.dot(src, v))
-                out.append((c, score))
-            return out
-        except Exception:
-            return [(c, _jaccard(term, c)) for c in candidates]
-
-    def suggest(self, term: str, target_candidates: list[str], top_k: int = 5) -> list[dict[str, object]]:
+    def suggest(self, term: str, target_candidates: list[str], top_k: int = 5, max_candidates: int = 300) -> list[dict[str, object]]:
         clean_pool: list[str] = []
         seen: set[str] = set()
         term_low = term.lower().strip()
@@ -107,7 +86,10 @@ class AnalogSuggester:
             seen.add(c_low)
             clean_pool.append(c1)
 
-        scored = self._score_candidates(term, clean_pool)
+            if len(clean_pool) >= max(1, int(max_candidates)):
+                break
+
+        scored = self._score_candidates(term, clean_pool, max_candidates=max_candidates)
         scored.sort(key=lambda x: x[1], reverse=True)
         out = [
             {"candidate": c, "score": round(float(s), 4)}
