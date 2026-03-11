@@ -47,9 +47,7 @@ type ExplainResponse = {
   model: string;
 };
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ??
-  "https://scibabel-backend-523773192713.us-central1.run.app";
+const API_BASE = "https://scibabel-backend-523773192713.us-central1.run.app";
 
 function renderHighlightedText(text: string, terms: AnnotatedTerm[], onSelect: (t: AnnotatedTerm) => void) {
   if (!terms.length) return <p className="whitespace-pre-wrap text-sm">{text}</p>;
