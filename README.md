@@ -68,20 +68,7 @@ Train domain classifier:
 
 - Import this GitHub repo into Vercel.
 - Set project root to `frontend/`.
-- Add env var: `NEXT_PUBLIC_API_BASE_URL=https://scibabel.onrender.com`.
-
-### Backend (Render)
-
-- Create a new Web Service from this repo.
-- Root directory: leave empty (repo root)
-- Build command: `pip install -r backend/requirements-prod.txt`
-- Start command: `cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT`
-
-Backend env vars:
-
-- `GEMINI_API_KEY=<your-key>`
-- `BACKEND_CORS_ORIGINS=https://sci-babel.vercel.app`
-- Optional: `GEMINI_MAX_RETRIES=0`, `GEMINI_RETRY_SLEEP_SEC=1.5`
+- Add env var: `NEXT_PUBLIC_API_BASE_URL=https://scibabel-backend-523773192713.us-central1.run.app`.
 
 ### Backend (Google Cloud Run)
 

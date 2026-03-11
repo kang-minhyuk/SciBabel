@@ -1,36 +1,3 @@
-services:
-  - type: web
-    name: scibabel-backend
-    runtime: python
-    rootDir: .
-    buildCommand: pip install -r backend/requirements-prod.txt
-    startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: SCIBABEL_ENV
-        value: production
-      - key: ANNOTATE_MAX_CONCURRENCY
-        value: "1"
-      - key: ANNOTATE_TIMEOUT_SEC
-        value: "5"
-      - key: EVIDENCE_ENABLED
-        value: "false"
-      - key: YAKE_ENABLED
-        value: "false"
-      - key: ANALOG_USE_EMBEDDINGS
-        value: "false"
-      - key: ANALOG_MAX_CANDIDATES
-        value: "300"
-      - key: ANALOG_MAX_TERMS
-        value: "6"
-      - key: SPACY_LOAD_MODEL_IN_PROD
-        value: "false"
-      - key: PRODUCTION_MAX_TERMS
-        value: "6"
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: BACKEND_CORS_ORIGINS
-        value: https://sci-babel.vercel.app
-      - key: GEMINI_TOTAL_RUNS
-        value: "16"
-      - key: GEMINI_INTER_CALL_SLEEP_SEC
-        value: "0.6"
+# Render deployment has been retired.
+# Backend is now deployed on Google Cloud Run.
+# See docs/cloud-run.md for deployment instructions.

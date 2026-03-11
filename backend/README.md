@@ -54,7 +54,7 @@ Backend supports provider switch via `LLM_PROVIDER`:
 - `GEMINI_RETRY_SLEEP_SEC` (default `1.5`)
 - `GEMINI_MODEL` (optional model pin)
 
-### Render/Fly/Railway start command
+### Start command
 
 - `uvicorn app:app --host 0.0.0.0 --port $PORT`
 
