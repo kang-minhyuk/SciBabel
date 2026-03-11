@@ -74,3 +74,41 @@ def test_extract_when_spacy_unavailable_uses_fallback(monkeypatch) -> None:
     items = extract_terms(text, max_terms=12)
     terms = " | ".join(str(x["term"]).lower() for x in items)
     assert "graph neural" in terms or "neural network" in terms or "distribution shift" in terms
+
+
+def test_extract_rejects_bad_phrase_fragments() -> None:
+    text = (
+        "We optimize a graph neural network with sparse regularization under distribution shift. "
+        "The transformer uses low-rank attention to reduce memory cost on long sequences. "
+        "A Monte Carlo simulation estimates magnetization under an external field. "
+        "We derive the partition function by an asymptotic method of the system."
+    )
+    items = extract_terms(text, max_terms=30)
+    terms = {str(x["term"]).lower() for x in items}
+    banned = {
+        "optimize a graph",
+        "memory cost on",
+        "by an",
+        "of the",
+        "the thin",
+        "we derive the",
+        "on long sequences",
+    }
+    assert terms.isdisjoint(banned)
+
+
+def test_extract_keeps_good_concept_phrases() -> None:
+    text = (
+        "We optimize a graph neural network with sparse regularization under distribution shift. "
+        "A Monte Carlo simulation estimates thermal conductivity in solids. "
+        "A packed-bed reactor uses model predictive control for stable operation."
+    )
+    items = extract_terms(text, max_terms=30)
+    joined = " | ".join(str(x["term"]).lower() for x in items)
+    assert "graph neural network" in joined
+    assert "sparse regularization" in joined
+    assert "distribution shift" in joined
+    assert "monte carlo simulation" in joined
+    assert "thermal conductivity" in joined
+    assert "packed-bed reactor" in joined
+    assert "model predictive control" in joined

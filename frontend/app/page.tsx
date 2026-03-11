@@ -17,6 +17,8 @@ type AnnotatedTerm = {
   flagged: boolean;
   familiarity_tgt: number;
   distinctiveness_src: number;
+  familiarity_source?: string;
+  distinctiveness_source?: string;
   reason: string;
   analogs: Analog[];
   evidence: Evidence[];
@@ -65,7 +67,11 @@ function renderHighlightedText(text: string, terms: AnnotatedTerm[], onSelect: (
       <button
         type="button"
         key={`term-${idx}-${s}`}
-        className={`rounded px-1 ${t.flagged ? "bg-amber-200 text-amber-950" : "bg-slate-200 text-slate-900"}`}
+        className={`mx-0.5 rounded-md px-1.5 py-0.5 transition-colors ${
+          t.flagged
+            ? "bg-amber-300/80 text-amber-950 underline decoration-2 underline-offset-2 hover:bg-amber-300"
+            : "bg-slate-200 text-slate-900 hover:bg-slate-300"
+        }`}
         onClick={() => onSelect(t)}
       >
         {piece}
@@ -86,6 +92,7 @@ export default function HomePage() {
   const [audience, setAudience] = useState<AudienceLevel>("grad");
   const [subtrack, setSubtrack] = useState("");
   const [maxTerms, setMaxTerms] = useState(8);
+  const [sameFieldStudyMode, setSameFieldStudyMode] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -113,7 +120,7 @@ export default function HomePage() {
   };
 
   const shouldAskOverride = Boolean(
-    src === "auto" && (result?.is_ambiguous || (typeof result?.predicted_src_confidence === "number" && result.predicted_src_confidence < 0.55))
+    src === "auto" && result?.is_ambiguous
   );
 
   const onAnnotate = async () => {
@@ -130,6 +137,7 @@ export default function HomePage() {
           text,
           src,
           tgt,
+          same_field_mode: sameFieldStudyMode ? "study" : "normal",
           audience_level: audience,
           subtrack,
           max_terms: maxTerms,
@@ -164,6 +172,7 @@ export default function HomePage() {
           text,
           src: overrideSrc,
           tgt,
+          same_field_mode: sameFieldStudyMode ? "study" : "normal",
           audience_level: audience,
           subtrack,
           max_terms: maxTerms,
@@ -289,6 +298,16 @@ export default function HomePage() {
           </div>
         </div>
 
+        <label className="mt-3 flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={sameFieldStudyMode}
+            onChange={(e) => setSameFieldStudyMode(e.target.checked)}
+            className="h-4 w-4 rounded border-slate-300"
+          />
+          Study mode for same field (broader highlights when source and target are the same)
+        </label>
+
         <div className="mt-3 text-xs text-slate-500">
           Legacy translation flow available at <a className="text-blue-600 underline" href="/translate">/translate</a>
         </div>
@@ -308,7 +327,7 @@ export default function HomePage() {
         {shouldAskOverride && (
           <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
             <p>
-              Source domain unclear: {top2[0]?.[0] ?? "-"} {typeof top2[0]?.[1] === "number" ? top2[0][1].toFixed(2) : "-"}
+              Source domain is ambiguous: {top2[0]?.[0] ?? "-"} {typeof top2[0]?.[1] === "number" ? top2[0][1].toFixed(2) : "-"}
               {" "}vs {top2[1]?.[0] ?? "-"} {typeof top2[1]?.[1] === "number" ? top2[1][1].toFixed(2) : "-"}. Please confirm.
             </p>
             <div className="mt-2 flex gap-2">
@@ -340,6 +359,12 @@ export default function HomePage() {
             }
           })}</div>
 
+          {result && result.terms.filter((t) => t.flagged).length === 0 && (
+            <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              No unfamiliar terms detected for this target field.
+            </div>
+          )}
+
           {result?.src_warning && (
             <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
               This text looks more like {result.predicted_src}
@@ -350,7 +375,7 @@ export default function HomePage() {
 
           {result && (
             <div className="mt-4 text-sm">
-              <span className="font-medium">Detected terms:</span> {result.terms.length}
+              <span className="font-medium">Detected terms:</span> {result.terms.length} (flagged: {result.terms.filter((t) => t.flagged).length})
             </div>
           )}
         </div>
@@ -369,6 +394,14 @@ export default function HomePage() {
               <p>
                 <span className="font-medium">Scores:</span> tgt familiarity {selectedTerm.familiarity_tgt.toFixed(3)}, src distinctiveness {selectedTerm.distinctiveness_src.toFixed(3)}
               </p>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className={`rounded px-2 py-1 ${selectedTerm.familiarity_tgt <= 0.25 ? "bg-red-100 text-red-800" : selectedTerm.familiarity_tgt <= 0.55 ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+                  Familiarity {selectedTerm.familiarity_tgt <= 0.25 ? "Low" : selectedTerm.familiarity_tgt <= 0.55 ? "Medium" : "High"}
+                </span>
+                <span className={`rounded px-2 py-1 ${selectedTerm.distinctiveness_src >= 0.7 ? "bg-purple-100 text-purple-800" : selectedTerm.distinctiveness_src >= 0.45 ? "bg-sky-100 text-sky-800" : "bg-slate-100 text-slate-700"}`}>
+                  Source distinctiveness {selectedTerm.distinctiveness_src >= 0.7 ? "High" : selectedTerm.distinctiveness_src >= 0.45 ? "Medium" : "Low"}
+                </span>
+              </div>
 
               {shortCache[`${selectedTerm.term}::short`] && (
                 <div className="rounded bg-blue-50 p-2 text-blue-900">{shortCache[`${selectedTerm.term}::short`]}</div>
@@ -388,6 +421,7 @@ export default function HomePage() {
                     </li>
                   ))}
                 </ul>
+                {selectedTerm.analogs.length === 0 && <p className="mt-1 text-xs text-slate-500">No high-confidence analogs found.</p>}
               </div>
 
               <div>
@@ -402,6 +436,7 @@ export default function HomePage() {
                     </li>
                   ))}
                 </ul>
+                {selectedTerm.evidence.length === 0 && <p className="mt-1 text-xs text-slate-500">No evidence snippets available for this term yet.</p>}
               </div>
 
               <button

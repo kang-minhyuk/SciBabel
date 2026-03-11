@@ -31,10 +31,25 @@ def _load_generic_block_from_stoplist() -> set[str]:
 
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-_/]*")
+STOP = {"the", "a", "an", "of", "on", "in", "by", "with", "to", "for", "and", "or"}
 
 
 def _tokenize(text: str) -> set[str]:
     return {m.group(0).lower() for m in TOKEN_RE.finditer(text)}
+
+
+def _is_generic_phrase(text: str) -> bool:
+    toks = [m.group(0).lower() for m in TOKEN_RE.finditer(text)]
+    if not toks:
+        return True
+    if toks[0] in STOP:
+        return True
+    stop_ratio = sum(1 for t in toks if t in STOP) / max(1, len(toks))
+    if stop_ratio > 0.45:
+        return True
+    if len(toks) < 2:
+        return True
+    return False
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -80,6 +95,8 @@ class AnalogSuggester:
             if c_low in seen:
                 continue
             if c_low in self._generic:
+                continue
+            if _is_generic_phrase(c1):
                 continue
             if len(c_low) < 3:
                 continue

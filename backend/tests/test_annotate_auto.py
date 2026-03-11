@@ -6,7 +6,8 @@ import app as app_module
 
 
 class _DummyEngine:
-    def annotate(self, text: str, src: str, tgt: str, max_terms: int = 8) -> dict[str, object]:
+    def annotate(self, text: str, src: str, tgt: str, max_terms: int = 8, same_field_mode: str = "normal") -> dict[str, object]:
+        _ = same_field_mode
         return {
             "src_effective": src,
             "terms": [
@@ -55,6 +56,7 @@ def test_annotate_auto_includes_source_metadata(monkeypatch) -> None:
             "text": "We optimize a regularized loss using gradient descent and sparse attention in a neural architecture.",
             "src": "auto",
             "tgt": "PM",
+            "same_field_mode": "normal",
             "max_terms": 6,
         },
     )
@@ -63,5 +65,8 @@ def test_annotate_auto_includes_source_metadata(monkeypatch) -> None:
 
     assert body["predicted_src"] == "CSM"
     assert body["src_used"] == "CSM"
+    assert body["is_ambiguous"] is False
+    assert body["suggested_src"] == "CSM"
+    assert float(body["top2_gap"]) > 0.10
     assert isinstance(body["predicted_src_probs"], dict)
     assert "terms" in body and isinstance(body["terms"], list)

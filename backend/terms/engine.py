@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
@@ -32,7 +33,9 @@ class TermAnnotationEngine:
         self.lexicon_path = root / "data" / "processed" / "domain_lexicon.json"
         self.term_stats_path = root / "data" / "processed" / "term_stats.csv"
         self.model_path = root / "models" / "domain_clf.joblib"
-        self.evidence_index_path = root / "data" / "processed" / "evidence_index.json"
+        self.evidence_index_path = Path(
+            os.getenv("EVIDENCE_INDEX_PATH", str(root / "data" / "processed" / "evidence_index.jsonl"))
+        )
 
         default_env = "production" if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} else "dev"
         env = os.getenv("SCIBABEL_ENV", default_env).strip().lower()
@@ -42,6 +45,8 @@ class TermAnnotationEngine:
         self.yake_enabled = os.getenv("YAKE_ENABLED", "false" if self.is_production else "true").strip().lower() in {"1", "true", "yes", "on"}
         self.analog_max_candidates = max(50, int(os.getenv("ANALOG_MAX_CANDIDATES", "300")))
         self.analog_max_terms = max(1, int(os.getenv("ANALOG_MAX_TERMS", "6")))
+        self.analog_max_return = max(1, int(os.getenv("ANALOG_MAX_RETURN", "5")))
+        analog_min_score = float(os.getenv("ANALOG_MIN_SCORE", str(analog_threshold)))
 
         missing = [
             p
@@ -64,7 +69,7 @@ class TermAnnotationEngine:
         self.term_stats = self._load_term_stats(self.term_stats_path)
         self.clf = joblib.load(self.model_path)
         self.scoring_cfg = TermScoreConfig(src_threshold=src_threshold, tgt_threshold=tgt_threshold)
-        self.analog = AnalogSuggester(analog_sim_threshold=analog_threshold)
+        self.analog = AnalogSuggester(analog_sim_threshold=analog_min_score)
         self.domains = sorted(self.lexicon_by_domain.keys())
         self.evidence_index = self._load_evidence_index() if self.evidence_enabled else {}
 
@@ -134,33 +139,50 @@ class TermAnnotationEngine:
         if not self.evidence_index_path.exists():
             return {}
         try:
-            raw = json.loads(self.evidence_index_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return {}
-            out: dict[str, list[dict[str, str]]] = {}
-            for key, val in raw.items():
-                if not isinstance(val, list):
-                    continue
-                cleaned_rows: list[dict[str, str]] = []
-                for row in val:
+            suffix = self.evidence_index_path.suffix.lower()
+            out: dict[str, list[dict[str, str]]] = defaultdict(list)
+
+            if suffix == ".jsonl":
+                for line in self.evidence_index_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
                     if not isinstance(row, dict):
                         continue
-                    cleaned_rows.append(
+                    key = str(row.get("key") or f"{row.get('tgt', '')}::{row.get('phrase', '')}").strip().lower()
+                    if not key or "::" not in key:
+                        continue
+                    out[key].append(
                         {
                             "snippet": str(row.get("snippet", "")),
                             "doc_id": str(row.get("doc_id", "")),
                             "source": str(row.get("source", "")),
                         }
                     )
-                out[str(key).strip().lower()] = cleaned_rows
-            return out
+            else:
+                raw = json.loads(self.evidence_index_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for key, val in raw.items():
+                        if not isinstance(val, list):
+                            continue
+                        for row in val:
+                            if not isinstance(row, dict):
+                                continue
+                            out[str(key).strip().lower()].append(
+                                {
+                                    "snippet": str(row.get("snippet", "")),
+                                    "doc_id": str(row.get("doc_id", "")),
+                                    "source": str(row.get("source", "")),
+                                }
+                            )
+            return dict(out)
         except Exception:
             return {}
 
     def _evidence_lookup(self, tgt: str, phrase: str, max_hits: int = 2) -> list[dict[str, str]]:
         if not self.evidence_enabled:
             return []
-        key = f"{tgt.upper()}::{phrase.strip().lower()}"
+        key = f"{tgt.upper()}::{phrase.strip().lower()}".lower()
         rows = self.evidence_index.get(key, [])
         if not rows:
             return []
@@ -174,7 +196,14 @@ class TermAnnotationEngine:
         idx = int(probs.argmax())
         return str(labels[idx]), float(probs[idx])
 
-    def annotate(self, text: str, src: str, tgt: Domain, max_terms: int = 8) -> dict[str, object]:
+    def annotate(
+        self,
+        text: str,
+        src: str,
+        tgt: Domain,
+        max_terms: int = 8,
+        same_field_mode: str = "normal",
+    ) -> dict[str, object]:
         t_all = time.perf_counter()
 
         predicted_src, pred_conf = self.predict_src(text)
@@ -207,6 +236,7 @@ class TermAnnotationEngine:
                 lexicon_by_domain=self.lexicon_by_domain,
                 lexicon_lower_by_domain=self.lexicon_lower_by_domain,
                 cfg=self.scoring_cfg,
+                same_field_mode=same_field_mode,
             )
         except Exception as exc:
             print(f"[annotate] score_terms_error={exc}")
@@ -234,7 +264,7 @@ class TermAnnotationEngine:
                     analogs = self.analog.suggest(
                         term=term,
                         target_candidates=analog_candidates,
-                        top_k=5,
+                        top_k=self.analog_max_return,
                         max_candidates=local_cap,
                     )
                     comparisons_used += max(0, local_cap)
@@ -243,12 +273,14 @@ class TermAnnotationEngine:
                 analogs = []
             t_analog_total += time.perf_counter() - t0
 
-            evidence_term = str(analogs[0]["candidate"]) if analogs else term
+            evidence_term = term
             evidence: list[dict[str, str]] = []
             if self.evidence_enabled:
                 t0 = time.perf_counter()
                 try:
                     evidence = self._evidence_lookup(tgt=tgt, phrase=evidence_term, max_hits=2)
+                    if not evidence and analogs:
+                        evidence = self._evidence_lookup(tgt=tgt, phrase=str(analogs[0]["candidate"]), max_hits=2)
                 except Exception as exc:
                     print(f"[annotate] evidence_lookup_error term={evidence_term!r} err={exc}")
                     evidence = []

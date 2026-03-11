@@ -6,7 +6,8 @@ import app as app_module
 
 
 class _DummyEngine:
-    def annotate(self, text: str, src: str, tgt: str, max_terms: int = 8) -> dict[str, object]:
+    def annotate(self, text: str, src: str, tgt: str, max_terms: int = 8, same_field_mode: str = "normal") -> dict[str, object]:
+        _ = same_field_mode
         return {
             "src_effective": src,
             "_timings": {

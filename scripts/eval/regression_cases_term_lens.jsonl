@@ -1,0 +1,10 @@
+{"id":"csm_1","src":"CSM","tgt":"PM","text":"We optimize a graph neural network with sparse regularization under distribution shift."}
+{"id":"csm_2","src":"CSM","tgt":"PM","text":"The transformer uses low-rank attention to reduce memory cost on long sequences."}
+{"id":"csm_3","src":"CSM","tgt":"PM","text":"A reinforcement learning policy improves sample efficiency using prioritized replay."}
+{"id":"pm_1","src":"PM","tgt":"CSM","text":"The phase transition is characterized by an order parameter near criticality."}
+{"id":"pm_2","src":"PM","tgt":"CSM","text":"A Monte Carlo simulation estimates magnetization under an external field."}
+{"id":"pm_3","src":"PM","tgt":"CSM","text":"Lattice defects alter phonon scattering and thermal conductivity."}
+{"id":"chem_1","src":"CHEM","tgt":"CHEME","text":"NMR spectroscopy confirms the aromatic substitution pattern of the product."}
+{"id":"chem_2","src":"CHEM","tgt":"CHEME","text":"The catalytic cycle proceeds through oxidative addition and reductive elimination."}
+{"id":"cheme_1","src":"CHEME","tgt":"CHEM","text":"Process control uses model predictive control to stabilize reactor temperature."}
+{"id":"cheme_2","src":"CHEME","tgt":"CHEM","text":"Adsorption isotherms guide design of cyclic gas separation processes."}

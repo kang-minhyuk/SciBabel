@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from terms.clean import clean_text_for_mining
 from terms.keyphrases import extract_yake_keyphrases_with_spans
@@ -23,12 +24,83 @@ _STOP_ALL = load_all_stoplists()
 _DEBUG = load_stoplist("debug_artifacts.txt")
 _ACADEMIC = load_stoplist("academic_stopwords.txt")
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-_/()]*")
-VERB_LIKE = {"use", "uses", "using", "reduce", "reduces", "preserve", "preserving", "improve", "improves"}
-BASIC_CONNECTORS = {"to", "while", "under", "in", "for", "with", "and", "or"}
+VERB_LIKE = {
+    "use",
+    "uses",
+    "using",
+    "reduce",
+    "reduces",
+    "preserve",
+    "preserving",
+    "improve",
+    "improves",
+    "optimize",
+    "optimizes",
+    "derive",
+    "derives",
+    "estimating",
+    "estimate",
+    "estimates",
+}
+BASIC_CONNECTORS = {"to", "while", "under", "in", "for", "with", "and", "or", "on", "of", "by"}
+LEADING_STRIP = {
+    "the",
+    "our",
+    "a",
+    "an",
+    "this",
+    "that",
+    "these",
+    "those",
+    "we",
+    "i",
+    "they",
+    "by",
+    "of",
+    "on",
+    "in",
+    "with",
+    "under",
+    "for",
+    "to",
+}
+TRAILING_STRIP = {
+    "of",
+    "on",
+    "in",
+    "by",
+    "with",
+    "under",
+    "to",
+    "for",
+    "from",
+    "and",
+    "or",
+    "the",
+    "a",
+    "an",
+}
+GENERIC_ACADEMIC = {
+    "method",
+    "methods",
+    "approach",
+    "approaches",
+    "system",
+    "systems",
+    "model",
+    "models",
+    "pattern",
+    "analysis",
+    "study",
+    "result",
+    "results",
+}
 TECH_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b[A-Za-z]{1,4}\(\d+(?:,\d+)*\)-[A-Za-z]+(?:-[A-Za-z]+)*\b"),
     re.compile(r"\bk-space\b", re.IGNORECASE),
 ]
+ACRONYM_RE = re.compile(r"^[A-Z]{2,}(?:\d+)?$")
+SYMBOLIC_RE = re.compile(r"[()\\[\\]{}]|/|\\+|\\*")
 
 
 @dataclass(frozen=True)
@@ -85,6 +157,71 @@ def _normalize_phrase(text: str) -> str:
     return t.strip(".,;:!?\"'`()[]{}")
 
 
+def _tokenize_with_span(text: str) -> list[re.Match[str]]:
+    return list(TOKEN_RE.finditer(text))
+
+
+def _is_acronym_or_symbolic(term: str) -> bool:
+    clean = term.strip()
+    if not clean:
+        return False
+    if ACRONYM_RE.match(clean):
+        return True
+    if SYMBOLIC_RE.search(clean):
+        return True
+    low = clean.lower()
+    if any(x in low for x in ["o(", "se(", "so(", "su(", "log("]):
+        return True
+    if "k-space" in clean.lower():
+        return True
+    return False
+
+
+def normalize_phrase_span(text: str, start: int, end: int) -> Optional[tuple[int, int, str]]:
+    segment = text[start:end]
+    toks = _tokenize_with_span(segment)
+    if not toks:
+        return None
+
+    left = 0
+    right = len(toks) - 1
+    while left <= right and toks[left].group(0).lower() in LEADING_STRIP:
+        left += 1
+    while right >= left and toks[right].group(0).lower() in (TRAILING_STRIP | _STOP_ALL | VERB_LIKE | BASIC_CONNECTORS):
+        right -= 1
+    if left > right:
+        return None
+
+    new_start = start + toks[left].start()
+    new_end = start + toks[right].end()
+    cleaned = text[new_start:new_end].strip(" ,.;:")
+    if not cleaned:
+        return None
+
+    clean_tokens = [m.group(0) for m in TOKEN_RE.finditer(cleaned)]
+    if not clean_tokens:
+        return None
+    token_lowers = [t.lower() for t in clean_tokens]
+
+    stop_ratio = sum(1 for t in token_lowers if t in _STOP_ALL) / max(1, len(token_lowers))
+    if stop_ratio > 0.4:
+        return None
+
+    if len(clean_tokens) == 1 and not _is_acronym_or_symbolic(cleaned):
+        return None
+    if len(clean_tokens) > 5 and not _is_acronym_or_symbolic(cleaned):
+        return None
+
+    generic_ratio = sum(1 for t in token_lowers if t in GENERIC_ACADEMIC) / max(1, len(token_lowers))
+    if generic_ratio >= 0.6:
+        return None
+
+    if any(t in VERB_LIKE for t in token_lowers):
+        return None
+
+    return new_start, new_end, cleaned
+
+
 def _is_stopword_only(text: str) -> bool:
     toks = [m.group(0).lower() for m in TOKEN_RE.finditer(text)]
     if not toks:
@@ -112,27 +249,20 @@ def _valid_candidate(text: str) -> bool:
         return False
     if any(t in BASIC_CONNECTORS for t in toks):
         return False
+    if len(toks) == 1 and not _is_acronym_or_symbolic(text):
+        return False
+    if len(toks) > 5 and not _is_acronym_or_symbolic(text):
+        return False
+    if (sum(1 for t in toks if t in _STOP_ALL) / max(1, len(toks))) > 0.4:
+        return False
     return True
 
 
 def _refine_span(cleaned: str, start: int, end: int) -> tuple[int, int, str]:
-    segment = cleaned[start:end]
-    toks = list(TOKEN_RE.finditer(segment))
-    if not toks:
-        return start, end, segment
-
-    left = 0
-    right = len(toks) - 1
-    while left <= right and toks[left].group(0).lower() in (_STOP_ALL | VERB_LIKE | BASIC_CONNECTORS):
-        left += 1
-    while right >= left and toks[right].group(0).lower() in (_STOP_ALL | VERB_LIKE | BASIC_CONNECTORS):
-        right -= 1
-    if left > right:
-        return start, end, segment
-
-    new_start = start + toks[left].start()
-    new_end = start + toks[right].end()
-    return new_start, new_end, cleaned[new_start:new_end]
+    normalized = normalize_phrase_span(cleaned, start, end)
+    if normalized is None:
+        return start, end, cleaned[start:end]
+    return normalized
 
 
 def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
@@ -306,10 +436,15 @@ def extract_terms_profiled(text: str, max_terms: int = 12, yake_enabled: bool | 
     t0 = time.perf_counter()
     use_yake = _is_yake_enabled() if yake_enabled is None else bool(yake_enabled)
     if use_yake:
-        yake_terms = [
-            SpanTerm(term=str(x["term"]), start=int(x["start"]), end=int(x["end"]), source="yake")
-            for x in extract_yake_keyphrases_with_spans(text, top_k=20)
-        ]
+        yake_terms = []
+        for x in extract_yake_keyphrases_with_spans(text, top_k=20):
+            normalized = normalize_phrase_span(text, int(x["start"]), int(x["end"]))
+            if normalized is None:
+                continue
+            s, e, term = normalized
+            if not _valid_candidate(term):
+                continue
+            yake_terms.append(SpanTerm(term=term, start=s, end=e, source="yake"))
     else:
         yake_terms = []
     t_yake = time.perf_counter() - t0

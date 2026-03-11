@@ -36,7 +36,7 @@ CHEM_HINTS = {
 
 @dataclass
 class DetectorConfig:
-    min_words: int = int(os.getenv("SRC_AUTO_MIN_WORDS", "18"))
+    min_words: int = int(os.getenv("SRC_AUTO_MIN_WORDS", "8"))
     min_conf: float = float(os.getenv("SRC_AUTO_MIN_CONF", "0.55"))
     min_gap: float = float(os.getenv("SRC_AUTO_MIN_GAP", "0.10"))
 

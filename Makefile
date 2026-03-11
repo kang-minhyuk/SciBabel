@@ -4,7 +4,7 @@ BACKEND := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend
 ARXIV_TARGET ?= 2000
 
-.PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test smoke smoke-phrases check spacy-model eval autotune diagnose bench smoke-prod-stability cloudrun-deploy \
+.PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test smoke smoke-phrases check spacy-model eval autotune diagnose bench smoke-prod-stability cloudrun-deploy regression-term-lens \
 	test-syntax fetch-arxiv fetch-chemrxiv fetch-openalex fetch-textmining build-corpus mine-terms train-clf validate-artifacts textmining-all diagnose-chemrxiv \
 	fetch-arxiv-csm fetch-arxiv-pm fetch-openalex-chem fetch-openalex-cheme fetch-all corpus-report test-backend smoke-auto build-artifacts check-startup smoke-render
 
@@ -92,6 +92,17 @@ smoke-prod-stability:
 
 cloudrun-deploy:
 	cd $(ROOT) && ./scripts/deploy_cloud_run.sh
+
+regression-term-lens:
+	@set -e; \
+	cd $(BACKEND) && SCIBABEL_ENV=production EVIDENCE_ENABLED=true YAKE_ENABLED=false SCIBABEL_FAKE_LLM=1 uvicorn app:app --host 127.0.0.1 --port 8000 >/tmp/scibabel_regression_term_lens.log 2>&1 & \
+	PID=$$!; \
+	trap 'kill $$PID >/dev/null 2>&1 || true' EXIT; \
+	for i in $$(seq 1 40); do \
+		curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done; \
+	cd $(ROOT) && python3 scripts/eval/run_term_lens_regression.py --api-base http://127.0.0.1:8000
 
 spacy-model:
 	python3 -m spacy download en_core_web_sm

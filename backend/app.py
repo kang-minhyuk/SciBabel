@@ -73,6 +73,7 @@ class AnnotateRequest(BaseModel):
     tgt: Domain
     audience_level: AudienceLevel = "grad"
     subtrack: str | None = None
+    same_field_mode: Literal["normal", "study"] = "normal"
     max_terms: int = Field(default=8, ge=1, le=20)
     include_short_explanations: bool = False
 
@@ -517,6 +518,7 @@ def _annotate_impl_sync(payload: AnnotateRequest, include_profile: bool = False)
             src=src_used,
             tgt=payload.tgt,
             max_terms=effective_max_terms,
+            same_field_mode=payload.same_field_mode,
         )
     except Exception as exc:
         raise RuntimeError(f"Annotate failed: {exc}") from exc
