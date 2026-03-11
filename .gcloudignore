@@ -1,0 +1,28 @@
+# Explicit gcloud upload rules for Cloud Build
+# Keep build context small, but include required runtime artifacts.
+
+.git
+.gitignore
+.github/
+.vscode/
+.pytest_cache/
+__pycache__/
+logs/
+reports/
+frontend/node_modules/
+frontend/.next/
+.DS_Store
+.env
+
+# Raw large data not needed at runtime
+data/raw/**
+
+# Keep processed artifacts required by backend
+!data/
+!data/processed/
+!data/processed/domain_lexicon.json
+!data/processed/term_stats.csv
+
+# Keep trained classifier artifact
+!models/
+!models/domain_clf.joblib

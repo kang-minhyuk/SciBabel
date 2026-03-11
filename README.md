@@ -74,7 +74,7 @@ Train domain classifier:
 
 - Create a new Web Service from this repo.
 - Root directory: leave empty (repo root)
-- Build command: `pip install -r backend/requirements.txt`
+- Build command: `pip install -r backend/requirements-prod.txt`
 - Start command: `cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT`
 
 Backend env vars:
@@ -82,3 +82,9 @@ Backend env vars:
 - `GEMINI_API_KEY=<your-key>`
 - `BACKEND_CORS_ORIGINS=https://sci-babel.vercel.app`
 - Optional: `GEMINI_MAX_RETRIES=0`, `GEMINI_RETRY_SLEEP_SEC=1.5`
+
+### Backend (Google Cloud Run)
+
+- `Dockerfile` is provided at repo root.
+- Deploy helper script: `scripts/deploy_cloud_run.sh`
+- Full guide: [docs/cloud-run.md](docs/cloud-run.md)

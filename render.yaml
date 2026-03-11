@@ -8,6 +8,10 @@ services:
     envVars:
       - key: SCIBABEL_ENV
         value: production
+      - key: ANNOTATE_MAX_CONCURRENCY
+        value: "1"
+      - key: ANNOTATE_TIMEOUT_SEC
+        value: "5"
       - key: EVIDENCE_ENABLED
         value: "false"
       - key: YAKE_ENABLED

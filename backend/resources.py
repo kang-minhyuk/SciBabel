@@ -43,6 +43,14 @@ class ResourceManager:
         self.scibabel_env = env if env in {"dev", "production"} else "dev"
         default_evidence = "false" if self.scibabel_env == "production" else "true"
         self.evidence_enabled = os.getenv("EVIDENCE_ENABLED", default_evidence).strip().lower() in {"1", "true", "yes", "on"}
+        print(
+            "[startup] artifact_paths",
+            {
+                "lexicon": str(LEXICON_PATH.resolve()),
+                "term_stats": str(TERM_STATS_PATH.resolve()),
+                "domain_clf": str(MODEL_PATH.resolve()),
+            },
+        )
 
     def check_artifacts_present(self) -> tuple[bool, list[str], dict[str, str]]:
         artifacts = {

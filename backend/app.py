@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import re
 import sqlite3
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
 import hashlib
+import uuid
 
 import joblib
 from dotenv import load_dotenv
@@ -166,10 +168,12 @@ if os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"} and "SC
     SCIBABEL_ENV = "production"
 print(f"[startup] SCIBABEL_ENV={SCIBABEL_ENV}")
 
-ANNOTATE_MAX_CONCURRENCY = max(1, int(os.getenv("ANNOTATE_MAX_CONCURRENCY", "4")))
+_ANNOTATE_DEFAULT_CONCURRENCY = "1" if SCIBABEL_ENV == "production" else "4"
+ANNOTATE_MAX_CONCURRENCY = max(1, int(os.getenv("ANNOTATE_MAX_CONCURRENCY", _ANNOTATE_DEFAULT_CONCURRENCY)))
 ANNOTATE_ACQUIRE_TIMEOUT_SEC = max(0.0, float(os.getenv("ANNOTATE_ACQUIRE_TIMEOUT_SEC", "0.1")))
-_ANNOTATE_SEMAPHORE = threading.BoundedSemaphore(ANNOTATE_MAX_CONCURRENCY)
-print(f"[startup] ANNOTATE_MAX_CONCURRENCY={ANNOTATE_MAX_CONCURRENCY}")
+ANNOTATE_TIMEOUT_SEC = max(0.1, float(os.getenv("ANNOTATE_TIMEOUT_SEC", "5")))
+_ANNOTATE_SEMAPHORE = asyncio.Semaphore(ANNOTATE_MAX_CONCURRENCY)
+print(f"[startup] ANNOTATE_MAX_CONCURRENCY={ANNOTATE_MAX_CONCURRENCY} ANNOTATE_TIMEOUT_SEC={ANNOTATE_TIMEOUT_SEC}")
 
 
 def _init_feedback_db() -> None:
@@ -209,6 +213,38 @@ def _artifacts_missing_response(missing: list[str]) -> JSONResponse:
             "missing": missing,
             "hint": ARTIFACT_HINT,
         },
+    )
+
+
+def _annotate_log(*, request_id: str, started_at: float, status_code: int, error_reason: str | None = None) -> None:
+    latency_ms = int((time.perf_counter() - started_at) * 1000)
+    print(
+        "[annotate_req]",
+        {
+            "request_id": request_id,
+            "latency_ms": latency_ms,
+            "status_code": status_code,
+            "error_reason": error_reason or "none",
+        },
+    )
+
+
+async def _acquire_annotate_slot() -> bool:
+    try:
+        await asyncio.wait_for(_ANNOTATE_SEMAPHORE.acquire(), timeout=ANNOTATE_ACQUIRE_TIMEOUT_SEC)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+def _busy_response() -> JSONResponse:
+    return JSONResponse(status_code=429, content={"error": "busy", "hint": "try again"})
+
+
+def _timeout_budget_response(timeout_sec: float) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"error": "timeout_budget_exceeded", "timeout_sec": timeout_sec},
     )
 
 
@@ -371,28 +407,64 @@ async def ready() -> dict[str, object]:
 
 
 @app.post("/annotate")
-def annotate(payload: AnnotateRequest) -> dict[str, object]:
-    acquired = _ANNOTATE_SEMAPHORE.acquire(timeout=ANNOTATE_ACQUIRE_TIMEOUT_SEC)
+async def annotate(payload: AnnotateRequest):
+    request_id = uuid.uuid4().hex[:10]
+    started = time.perf_counter()
+    acquired = await _acquire_annotate_slot()
     if not acquired:
-        raise HTTPException(status_code=503, detail="Annotate service busy. Please retry shortly.")
+        _annotate_log(request_id=request_id, started_at=started, status_code=429, error_reason="busy")
+        return _busy_response()
     try:
-        return _annotate_impl(payload, include_profile=False)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_annotate_impl_sync, payload, False),
+                timeout=ANNOTATE_TIMEOUT_SEC,
+            )
+            _annotate_log(request_id=request_id, started_at=started, status_code=200)
+            return result
+        except asyncio.TimeoutError:
+            _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="timeout_budget_exceeded")
+            return _timeout_budget_response(ANNOTATE_TIMEOUT_SEC)
+        except ArtifactsMissingError as exc:
+            _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="artifacts_missing")
+            return _artifacts_missing_response(exc.missing)
+        except Exception as exc:
+            _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="annotate_failed")
+            return JSONResponse(status_code=503, content={"error": "annotate_failed", "detail": str(exc)})
     finally:
         _ANNOTATE_SEMAPHORE.release()
 
 
 @app.post("/profile_annotate")
-def profile_annotate(payload: AnnotateRequest) -> dict[str, object]:
-    acquired = _ANNOTATE_SEMAPHORE.acquire(timeout=ANNOTATE_ACQUIRE_TIMEOUT_SEC)
+async def profile_annotate(payload: AnnotateRequest):
+    request_id = uuid.uuid4().hex[:10]
+    started = time.perf_counter()
+    acquired = await _acquire_annotate_slot()
     if not acquired:
-        raise HTTPException(status_code=503, detail="Annotate service busy. Please retry shortly.")
+        _annotate_log(request_id=request_id, started_at=started, status_code=429, error_reason="busy")
+        return _busy_response()
     try:
-        return _annotate_impl(payload, include_profile=True)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_annotate_impl_sync, payload, True),
+                timeout=ANNOTATE_TIMEOUT_SEC,
+            )
+            _annotate_log(request_id=request_id, started_at=started, status_code=200)
+            return result
+        except asyncio.TimeoutError:
+            _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="timeout_budget_exceeded")
+            return _timeout_budget_response(ANNOTATE_TIMEOUT_SEC)
+        except ArtifactsMissingError as exc:
+            _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="artifacts_missing")
+            return _artifacts_missing_response(exc.missing)
+        except Exception as exc:
+            _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="annotate_failed")
+            return JSONResponse(status_code=503, content={"error": "annotate_failed", "detail": str(exc)})
     finally:
         _ANNOTATE_SEMAPHORE.release()
 
 
-def _annotate_impl(payload: AnnotateRequest, include_profile: bool = False) -> dict[str, object]:
+def _annotate_impl_sync(payload: AnnotateRequest, include_profile: bool = False) -> dict[str, object]:
     t_all = time.perf_counter()
     effective_max_terms = int(payload.max_terms)
     if SCIBABEL_ENV == "production":
@@ -400,12 +472,7 @@ def _annotate_impl(payload: AnnotateRequest, include_profile: bool = False) -> d
         effective_max_terms = max(1, min(effective_max_terms, cap))
 
     t0 = time.perf_counter()
-    try:
-        resources = get_resources(load_explain=payload.include_short_explanations)
-    except ArtifactsMissingError as exc:
-        return _artifacts_missing_response(exc.missing)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Annotation engine unavailable: {exc}") from exc
+    resources = get_resources(load_explain=payload.include_short_explanations)
     t_load = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -452,7 +519,7 @@ def _annotate_impl(payload: AnnotateRequest, include_profile: bool = False) -> d
             max_terms=effective_max_terms,
         )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Annotate failed: {exc}") from exc
+        raise RuntimeError(f"Annotate failed: {exc}") from exc
 
     if payload.include_short_explanations:
         client = resources.explain_client

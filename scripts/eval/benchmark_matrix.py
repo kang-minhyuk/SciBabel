@@ -11,7 +11,7 @@ from pathlib import Path
 
 import requests
 
-API = "https://scibabel.onrender.com/annotate"
+API = "https://scibabel-backend-523773192713.us-central1.run.app/annotate"
 DOMAINS = ["CSM", "PM", "CHEM", "CHEME"]
 SAMPLES = {
     "CSM": [
@@ -67,12 +67,14 @@ SAMPLES = {
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--api", default=API, help="Annotate endpoint URL")
     parser.add_argument("--src", choices=DOMAINS, default=None, help="Run only one source domain")
     parser.add_argument("--tag", default="", help="Optional suffix tag for output files")
     parser.add_argument("--timeout", type=float, default=15.0, help="Per-request timeout seconds")
     parser.add_argument("--workers", type=int, default=16, help="Concurrent request workers")
     args = parser.parse_args()
 
+    api = str(args.api).strip()
     rows: list[dict[str, object]] = []
     timeout_sec = max(1.0, float(args.timeout))
     workers = max(1, int(args.workers))
@@ -99,7 +101,7 @@ def main() -> None:
         error = ""
         try:
             with requests.Session() as session:
-                resp = session.post(API, json=payload, timeout=timeout_sec)
+                resp = session.post(api, json=payload, timeout=timeout_sec)
             status = resp.status_code
             try:
                 body = resp.json()
@@ -127,7 +129,7 @@ def main() -> None:
             rows.append(fut.result())
 
     summary: list[dict[str, object]] = []
-    for src in DOMAINS:
+    for src in src_list:
         for tgt in DOMAINS:
             sub = [r for r in rows if r["src"] == src and r["tgt"] == tgt]
             lat = [float(r["latency_sec"]) for r in sub]
@@ -167,7 +169,7 @@ def main() -> None:
     lines = [
         "# Annotate Combination Report",
         "",
-        f"Endpoint: {API}",
+        f"Endpoint: {api}",
         f"Generated (UTC): {datetime.utcnow().isoformat()}Z",
         "",
         "| Combo | N | OK | Success | Avg(s) | P50(s) | Max(s) | AvgTerms |",
