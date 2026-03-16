@@ -11,3 +11,5 @@ PyYAML>=6.0.2
 openai>=1.65.0
 spacy>=3.7.0
 yake>=0.4.8
+pypdf>=5.0.0
+python-multipart>=0.0.9
