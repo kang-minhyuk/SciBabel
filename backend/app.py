@@ -16,7 +16,7 @@ import uuid
 
 import joblib
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -29,6 +29,9 @@ from reward import compute_reward
 from semantic import get_semantic_mode, semantic_similarity
 from llm.openai_client import ExplainRequest
 from resources import ArtifactsMissingError, check_ready, get_resources, get_spacy
+from pdf.extract import extract_pdf_pages, PdfExtractError, PdfEncryptedError, PdfEmptyTextError
+from pdf.store import create_document_id, save_document, load_document
+from pdf.annotate import annotate_pages, explain_term_from_document
 from term_strategy import (
     TermStrategy,
     TermStrategyEngine,
@@ -49,6 +52,7 @@ TERM_STATS_PATH = ROOT / "data" / "processed" / "term_stats.csv"
 TERM_ALIASES_PATH = ROOT / "backend" / "term_aliases.json"
 EXPLAIN_CACHE_DB = ROOT / "backend" / "explain_cache.sqlite3"
 FEEDBACK_DB = ROOT / "backend" / "feedback.sqlite3"
+ANALYTICS_LOG_PATH = Path(os.getenv("PRODUCT_ANALYTICS_LOG_PATH", str(ROOT / "logs" / "product_analytics.jsonl")))
 
 
 def _get_cors_origins() -> list[str]:
@@ -86,6 +90,19 @@ class ExplainRequestBody(BaseModel):
     audience_level: AudienceLevel = "grad"
     subtrack: str | None = None
     analogs: list[str] = Field(default_factory=list)
+    detail: Literal["short", "long"] = "short"
+
+
+class PdfExplainRequestBody(BaseModel):
+    document_id: str = Field(min_length=8)
+    page_num: int = Field(ge=1)
+    term_id: str | None = None
+    term: str | None = None
+    text: str | None = None
+    src: SourceDomain = "auto"
+    tgt: Domain
+    audience_level: AudienceLevel = "grad"
+    subtrack: str | None = None
     detail: Literal["short", "long"] = "short"
 
 
@@ -175,6 +192,17 @@ ANNOTATE_ACQUIRE_TIMEOUT_SEC = max(0.0, float(os.getenv("ANNOTATE_ACQUIRE_TIMEOU
 ANNOTATE_TIMEOUT_SEC = max(0.1, float(os.getenv("ANNOTATE_TIMEOUT_SEC", "5")))
 _ANNOTATE_SEMAPHORE = asyncio.Semaphore(ANNOTATE_MAX_CONCURRENCY)
 print(f"[startup] ANNOTATE_MAX_CONCURRENCY={ANNOTATE_MAX_CONCURRENCY} ANNOTATE_TIMEOUT_SEC={ANNOTATE_TIMEOUT_SEC}")
+_ANALYTICS_LOCK = threading.Lock()
+
+
+def _truthy_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+PRODUCT_ANALYTICS_ENABLED = _truthy_env("PRODUCT_ANALYTICS_ENABLED", default=True)
 
 
 def _init_feedback_db() -> None:
@@ -228,6 +256,120 @@ def _annotate_log(*, request_id: str, started_at: float, status_code: int, error
             "error_reason": error_reason or "none",
         },
     )
+
+
+def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _ANALYTICS_LOCK:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def _annotate_payload_meta(payload: AnnotateRequest) -> dict[str, object]:
+    text = _sanitize_output_text(payload.text)
+    return {
+        "src": payload.src,
+        "tgt": payload.tgt,
+        "audience_level": payload.audience_level,
+        "same_field_mode": payload.same_field_mode,
+        "max_terms": int(payload.max_terms),
+        "include_short_explanations": bool(payload.include_short_explanations),
+        "text_chars": len(text),
+        "text_words": len(text.split()),
+    }
+
+
+def _annotate_result_meta(result: dict[str, object]) -> dict[str, object]:
+    terms = result.get("terms", []) if isinstance(result, dict) else []
+    if not isinstance(terms, list):
+        terms = []
+    flagged = 0
+    analog_total = 0
+    evidence_total = 0
+    short_explanations = 0
+    for term in terms:
+        if not isinstance(term, dict):
+            continue
+        if bool(term.get("flagged")):
+            flagged += 1
+        analogs = term.get("analogs", [])
+        if isinstance(analogs, list):
+            analog_total += len(analogs)
+        evidence = term.get("evidence", [])
+        if isinstance(evidence, list):
+            evidence_total += len(evidence)
+        if str(term.get("short_explanation") or "").strip():
+            short_explanations += 1
+
+    return {
+        "src_used": result.get("src_used"),
+        "predicted_src": result.get("predicted_src"),
+        "src_warning": bool(result.get("src_warning", False)),
+        "src_warning_reason": result.get("src_warning_reason"),
+        "is_ambiguous": bool(result.get("is_ambiguous", False)),
+        "total_terms": len(terms),
+        "flagged_terms": flagged,
+        "analog_suggestions": analog_total,
+        "evidence_items": evidence_total,
+        "short_explanations": short_explanations,
+    }
+
+
+def _explain_payload_meta(payload: ExplainRequestBody, src_effective: str) -> dict[str, object]:
+    text = _sanitize_output_text(payload.text)
+    term = _sanitize_output_text(payload.term)
+    return {
+        "src": payload.src,
+        "src_effective": src_effective,
+        "tgt": payload.tgt,
+        "audience_level": payload.audience_level,
+        "detail": payload.detail,
+        "analogs_input": len(payload.analogs),
+        "text_chars": len(text),
+        "text_words": len(text.split()),
+        "term_chars": len(term),
+    }
+
+
+def _explain_result_meta(result: dict[str, object]) -> dict[str, object]:
+    short_text = str(result.get("short_explanation", "")) if isinstance(result, dict) else ""
+    long_text = str(result.get("long_explanation", "")) if isinstance(result, dict) else ""
+    return {
+        "short_chars": len(short_text.strip()),
+        "long_chars": len(long_text.strip()),
+        "has_short": bool(short_text.strip()),
+        "has_long": bool(long_text.strip()),
+    }
+
+
+def _log_product_event(
+    *,
+    event_type: str,
+    request_id: str,
+    started_at: float,
+    status_code: int,
+    payload_meta: dict[str, object],
+    result_meta: dict[str, object] | None = None,
+    error_reason: str | None = None,
+) -> None:
+    if not PRODUCT_ANALYTICS_ENABLED:
+        return
+    try:
+        event = {
+            "ts": int(time.time()),
+            "env": SCIBABEL_ENV,
+            "event_type": event_type,
+            "request_id": request_id,
+            "latency_ms": int((time.perf_counter() - started_at) * 1000),
+            "status_code": status_code,
+            "error_reason": error_reason or "none",
+            "payload": payload_meta,
+            "result": result_meta or {},
+        }
+        _append_jsonl(ANALYTICS_LOG_PATH, event)
+    except Exception:
+        # Never fail the API request because analytics logging is unavailable.
+        pass
 
 
 async def _acquire_annotate_slot() -> bool:
@@ -411,9 +553,18 @@ async def ready() -> dict[str, object]:
 async def annotate(payload: AnnotateRequest):
     request_id = uuid.uuid4().hex[:10]
     started = time.perf_counter()
+    payload_meta = _annotate_payload_meta(payload)
     acquired = await _acquire_annotate_slot()
     if not acquired:
         _annotate_log(request_id=request_id, started_at=started, status_code=429, error_reason="busy")
+        _log_product_event(
+            event_type="annotate",
+            request_id=request_id,
+            started_at=started,
+            status_code=429,
+            payload_meta=payload_meta,
+            error_reason="busy",
+        )
         return _busy_response()
     try:
         try:
@@ -422,27 +573,163 @@ async def annotate(payload: AnnotateRequest):
                 timeout=ANNOTATE_TIMEOUT_SEC,
             )
             _annotate_log(request_id=request_id, started_at=started, status_code=200)
+            _log_product_event(
+                event_type="annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=200,
+                payload_meta=payload_meta,
+                result_meta=_annotate_result_meta(result),
+            )
             return result
         except asyncio.TimeoutError:
             _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="timeout_budget_exceeded")
+            _log_product_event(
+                event_type="annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=503,
+                payload_meta=payload_meta,
+                error_reason="timeout_budget_exceeded",
+            )
             return _timeout_budget_response(ANNOTATE_TIMEOUT_SEC)
         except ArtifactsMissingError as exc:
             _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="artifacts_missing")
+            _log_product_event(
+                event_type="annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=503,
+                payload_meta=payload_meta,
+                error_reason="artifacts_missing",
+            )
             return _artifacts_missing_response(exc.missing)
         except Exception as exc:
             _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="annotate_failed")
+            _log_product_event(
+                event_type="annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=503,
+                payload_meta=payload_meta,
+                error_reason="annotate_failed",
+            )
             return JSONResponse(status_code=503, content={"error": "annotate_failed", "detail": str(exc)})
     finally:
         _ANNOTATE_SEMAPHORE.release()
+
+
+@app.post("/pdf/annotate")
+async def pdf_annotate(
+    file: UploadFile = File(...),
+    src: SourceDomain = Form("auto"),
+    tgt: Domain = Form(...),
+    audience_level: AudienceLevel = Form("grad"),
+    subtrack: str | None = Form(None),
+    same_field_mode: Literal["normal", "study"] = Form("normal"),
+    max_terms: int = Form(8),
+) -> dict[str, object]:
+    if (file.filename or "").lower().endswith(".pdf") is False:
+        raise HTTPException(status_code=422, detail="file must be a .pdf")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="empty file")
+
+    max_file_mb = max(1, int(os.getenv("PDF_MAX_FILE_MB", "20")))
+    if len(data) > max_file_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"file too large (> {max_file_mb}MB)")
+
+    max_pages = max(1, int(os.getenv("PDF_MAX_PAGES", "40")))
+    try:
+        extracted = await asyncio.to_thread(extract_pdf_pages, data, max_pages=max_pages, timeout_sec=15.0)
+    except PdfEncryptedError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PdfEmptyTextError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PdfExtractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"pdf_extract_failed: {exc}") from exc
+
+    document_id = create_document_id()
+    pages = [{"page_num": p.page_num, "text": p.text} for p in extracted]
+    payload = {
+        "src": src,
+        "tgt": tgt,
+        "audience_level": audience_level,
+        "subtrack": subtrack,
+        "same_field_mode": same_field_mode,
+    }
+    max_terms_total = max(1, min(200, int(max_terms) * max(1, len(pages))))
+    result = await asyncio.to_thread(
+        annotate_pages,
+        document_id=document_id,
+        filename=file.filename or "upload.pdf",
+        pages=pages,
+        payload=payload,
+        max_terms_per_page=max(1, min(20, int(max_terms))),
+        max_terms_total=max_terms_total,
+    )
+    save_document(result)
+    return result
+
+
+@app.get("/pdf/document/{document_id}")
+def pdf_get_document(document_id: str) -> dict[str, object]:
+    doc = load_document(document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    return doc
+
+
+@app.post("/pdf/explain")
+def pdf_explain(payload: PdfExplainRequestBody) -> dict[str, object]:
+    doc = load_document(payload.document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+
+    req = {
+        "page_num": payload.page_num,
+        "term_id": payload.term_id,
+        "term": payload.term,
+        "text": payload.text,
+        "src": payload.src,
+        "tgt": payload.tgt,
+        "audience_level": payload.audience_level,
+        "subtrack": payload.subtrack,
+        "detail": payload.detail,
+    }
+    try:
+        out = explain_term_from_document(doc, req)
+    except KeyError as exc:
+        code = str(exc)
+        if "page_not_found" in code:
+            raise HTTPException(status_code=404, detail="page_not_found") from exc
+        if "term_not_found" in code:
+            raise HTTPException(status_code=404, detail="term_not_found") from exc
+        raise HTTPException(status_code=422, detail="bad_request") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"explain_failed: {exc}") from exc
+    return out
 
 
 @app.post("/profile_annotate")
 async def profile_annotate(payload: AnnotateRequest):
     request_id = uuid.uuid4().hex[:10]
     started = time.perf_counter()
+    payload_meta = _annotate_payload_meta(payload)
     acquired = await _acquire_annotate_slot()
     if not acquired:
         _annotate_log(request_id=request_id, started_at=started, status_code=429, error_reason="busy")
+        _log_product_event(
+            event_type="profile_annotate",
+            request_id=request_id,
+            started_at=started,
+            status_code=429,
+            payload_meta=payload_meta,
+            error_reason="busy",
+        )
         return _busy_response()
     try:
         try:
@@ -451,15 +738,47 @@ async def profile_annotate(payload: AnnotateRequest):
                 timeout=ANNOTATE_TIMEOUT_SEC,
             )
             _annotate_log(request_id=request_id, started_at=started, status_code=200)
+            _log_product_event(
+                event_type="profile_annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=200,
+                payload_meta=payload_meta,
+                result_meta=_annotate_result_meta(result),
+            )
             return result
         except asyncio.TimeoutError:
             _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="timeout_budget_exceeded")
+            _log_product_event(
+                event_type="profile_annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=503,
+                payload_meta=payload_meta,
+                error_reason="timeout_budget_exceeded",
+            )
             return _timeout_budget_response(ANNOTATE_TIMEOUT_SEC)
         except ArtifactsMissingError as exc:
             _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="artifacts_missing")
+            _log_product_event(
+                event_type="profile_annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=503,
+                payload_meta=payload_meta,
+                error_reason="artifacts_missing",
+            )
             return _artifacts_missing_response(exc.missing)
         except Exception as exc:
             _annotate_log(request_id=request_id, started_at=started, status_code=503, error_reason="annotate_failed")
+            _log_product_event(
+                event_type="profile_annotate",
+                request_id=request_id,
+                started_at=started,
+                status_code=503,
+                payload_meta=payload_meta,
+                error_reason="annotate_failed",
+            )
             return JSONResponse(status_code=503, content={"error": "annotate_failed", "detail": str(exc)})
     finally:
         _ANNOTATE_SEMAPHORE.release()
@@ -609,16 +928,42 @@ def detect_source(payload: dict[str, str]) -> dict[str, object]:
 
 @app.post("/explain")
 def explain(payload: ExplainRequestBody) -> dict[str, object]:
+    request_id = uuid.uuid4().hex[:10]
+    started = time.perf_counter()
     try:
         resources = get_resources(load_explain=True)
     except ArtifactsMissingError as exc:
+        _log_product_event(
+            event_type="explain",
+            request_id=request_id,
+            started_at=started,
+            status_code=503,
+            payload_meta={"src": payload.src, "tgt": payload.tgt, "detail": payload.detail},
+            error_reason="artifacts_missing",
+        )
         return _artifacts_missing_response(exc.missing)
     except Exception as exc:
+        _log_product_event(
+            event_type="explain",
+            request_id=request_id,
+            started_at=started,
+            status_code=503,
+            payload_meta={"src": payload.src, "tgt": payload.tgt, "detail": payload.detail},
+            error_reason="explain_unavailable",
+        )
         raise HTTPException(status_code=503, detail=f"Explain service unavailable: {exc}") from exc
 
     client = resources.explain_client
     detector = resources.source_detector
     if client is None:
+        _log_product_event(
+            event_type="explain",
+            request_id=request_id,
+            started_at=started,
+            status_code=503,
+            payload_meta={"src": payload.src, "tgt": payload.tgt, "detail": payload.detail},
+            error_reason="explain_unavailable",
+        )
         raise HTTPException(status_code=503, detail="Explain service unavailable")
 
     src_effective = payload.src
@@ -637,11 +982,29 @@ def explain(payload: ExplainRequestBody) -> dict[str, object]:
         analogs=[_sanitize_output_text(a) for a in payload.analogs[:5]],
         detail=payload.detail,
     )
+    payload_meta = _explain_payload_meta(payload, str(src_effective))
 
     try:
         out = client.explain(req)
     except Exception as exc:
+        _log_product_event(
+            event_type="explain",
+            request_id=request_id,
+            started_at=started,
+            status_code=503,
+            payload_meta=payload_meta,
+            error_reason="explain_failed",
+        )
         raise HTTPException(status_code=503, detail=f"Explain request failed: {exc}") from exc
+
+    _log_product_event(
+        event_type="explain",
+        request_id=request_id,
+        started_at=started,
+        status_code=200,
+        payload_meta=payload_meta,
+        result_meta=_explain_result_meta(out),
+    )
 
     return out
 

@@ -3,7 +3,7 @@ from terms.score import TermScoreConfig, score_terms
 
 def _lexicon() -> dict[str, list[str]]:
     return {
-        "CSM": ["graph neural network", "distribution shift", "temperature scaling"],
+        "CSM": ["graph neural network", "distribution shift", "temperature scaling", "sparse regularization"],
         "PM": ["hamiltonian", "phase transition", "thermal conductivity"],
         "CHEM": ["nmr spectroscopy"],
         "CHEME": ["packed-bed reactor", "model predictive control"],
@@ -16,6 +16,7 @@ def _stats() -> dict[str, dict[str, float]]:
             "graph neural network": 3.4,
             "distribution shift": 2.9,
             "temperature scaling": 2.1,
+            "sparse regularization": 2.6,
             "packed": 0.4,
             "bed": 0.2,
             "reactor": 0.2,
@@ -24,6 +25,7 @@ def _stats() -> dict[str, dict[str, float]]:
             "graph neural network": -1.2,
             "distribution shift": -0.8,
             "temperature scaling": -0.9,
+            "sparse regularization": -0.7,
             "thermal conductivity": 2.4,
             "packed": -0.2,
             "bed": -0.2,
@@ -106,3 +108,26 @@ def test_cross_domain_still_flags_distinctive_terms() -> None:
         same_field_mode="normal",
     )
     assert out[0]["flagged"] is True
+
+
+def test_score_rejects_fragment_but_keeps_concepts() -> None:
+    extracted = [
+        {"term": "optimize a graph", "start": 0, "end": 16, "leading_lemma": "optimize", "leading_pos": "VERB"},
+        {"term": "graph neural network", "start": 3, "end": 23, "leading_lemma": "graph", "leading_pos": "NOUN", "noun_headed": True, "noun_adj_compound": True},
+        {"term": "sparse regularization", "start": 29, "end": 50, "leading_lemma": "sparse", "leading_pos": "ADJ", "noun_headed": True, "noun_adj_compound": True},
+        {"term": "distribution shift", "start": 57, "end": 75, "leading_lemma": "distribution", "leading_pos": "NOUN", "noun_headed": True, "noun_adj_compound": True},
+    ]
+    out = score_terms(
+        extracted_terms=extracted,
+        src="CSM",
+        tgt="PM",
+        all_domains=["CSM", "PM", "CHEM", "CHEME"],
+        term_stats=_stats(),
+        lexicon_by_domain=_lexicon(),
+        cfg=TermScoreConfig(src_threshold=0.35, tgt_threshold=0.45),
+    )
+    by_term = {str(r["term"]).lower(): r for r in out}
+    assert by_term["optimize a graph"]["flagged"] is False
+    assert by_term["graph neural network"]["flagged"] is True
+    assert by_term["sparse regularization"]["flagged"] is True
+    assert by_term["distribution shift"]["flagged"] is True

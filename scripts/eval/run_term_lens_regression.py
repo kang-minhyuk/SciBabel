@@ -2,183 +2,85 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+import sys
 from pathlib import Path
 
-import requests
-
-BAD_FRAGMENTS = {
-    "optimize a graph",
-    "memory cost on",
-    "on long sequences",
-    "by an",
-    "of the",
-    "the thin",
-    "we derive the",
-}
-GENERIC_ANALOGS = {
-    "at low temperature",
-    "pattern of the",
-    "of the",
-    "by an",
-    "the model",
-}
+from term_lens_eval_lib import (
+    load_cases,
+    now_ts,
+    resolve_live_api_base,
+    run_regression,
+    write_regression_reports,
+)
 
 
-def _load_cases(path: Path) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        rows.append({
-            "id": str(row["id"]),
-            "src": str(row["src"]),
-            "tgt": str(row["tgt"]),
-            "text": str(row["text"]),
-        })
-    return rows
+def _write_missing_live_report(out_dir: Path, ts: str, reason: str) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md_path = out_dir / f"term_lens_regression_prod_{ts}.md"
+    lines = [
+        "# Term Lens Regression Report (prod)",
+        "",
+        "## TODO: Live Endpoint Missing",
+        "",
+        "Live Cloud Run URL could not be resolved.",
+        "",
+        "Searched keys:",
+        "- SCIBABEL_API_BASE_URL",
+        "- NEXT_PUBLIC_API_BASE_URL",
+        "- CLOUD_RUN_BASE_URL",
+        "",
+        f"Resolution status: {reason}",
+        "",
+        "Set one of the variables above and rerun `make regression-term-lens-prod`.",
+    ]
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run term-lens regression cases against /annotate.")
-    parser.add_argument("--api-base", default="http://127.0.0.1:8000")
+    parser.add_argument("--api-base", default="", help="Endpoint base URL. If omitted for prod/live label, auto-resolve from env/config.")
+    parser.add_argument("--label", default="local", help="Report label (e.g., local, prod)")
     parser.add_argument("--cases", default="scripts/eval/regression_cases_term_lens.jsonl")
     parser.add_argument("--out", default="reports")
     parser.add_argument("--timeout", type=float, default=25.0)
     args = parser.parse_args()
 
-    base = args.api_base.rstrip("/")
-    cases = _load_cases(Path(args.cases))
+    repo_root = Path(__file__).resolve().parents[2]
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = now_ts()
 
-    records: list[dict[str, object]] = []
-    bad_phrase_count = 0
-    bad_analog_count = 0
-    same_domain_over_flagging = 0
-    ambiguous_high_conf = 0
+    api_base = args.api_base.strip().rstrip("/")
+    label = str(args.label).strip().lower()
 
-    for case in cases:
-        for same_field_mode in ["normal", "study"]:
-            payload = {
-                "text": case["text"],
-                "src": case["src"],
-                "tgt": case["tgt"],
-                "same_field_mode": same_field_mode,
-                "max_terms": 8,
-            }
-            r = requests.post(f"{base}/annotate", json=payload, timeout=args.timeout)
-            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text}
+    if not api_base:
+        if label in {"prod", "live"}:
+            resolved, source = resolve_live_api_base(repo_root)
+            if not resolved:
+                md_path = _write_missing_live_report(out_dir, ts, source)
+                print(json.dumps({"error": "live_api_base_missing", "todo_report": str(md_path.resolve())}, ensure_ascii=False))
+                raise SystemExit(2)
+            api_base = resolved
+        else:
+            api_base = "http://127.0.0.1:8000"
 
-            terms = body.get("terms", []) if isinstance(body, dict) else []
-            flagged = [t for t in terms if isinstance(t, dict) and bool(t.get("flagged"))]
+    cases = load_cases(Path(args.cases))
+    result = run_regression(api_base=api_base, cases=cases, timeout=float(args.timeout))
+    md_path, json_path = write_regression_reports(result, out_dir=out_dir, label=label, ts=ts)
 
-            bad_phrases = [
-                str(t.get("term", "")).lower()
-                for t in terms
-                if isinstance(t, dict) and str(t.get("term", "")).lower() in BAD_FRAGMENTS
-            ]
-            bad_phrase_count += len(bad_phrases)
-
-            bad_analogs = []
-            for t in terms:
-                if not isinstance(t, dict):
-                    continue
-                for a in t.get("analogs", []):
-                    cand = str(a.get("candidate", "")).lower()
-                    if cand in GENERIC_ANALOGS:
-                        bad_analogs.append(cand)
-            bad_analog_count += len(bad_analogs)
-
-            same_domain = case["src"] == case["tgt"]
-            if same_domain and same_field_mode == "normal" and len(flagged) > 2:
-                same_domain_over_flagging += 1
-
-            conf = float(body.get("predicted_src_confidence", 0.0)) if isinstance(body, dict) else 0.0
-            gap = float(body.get("top2_gap", 0.0)) if isinstance(body, dict) else 0.0
-            amb = bool(body.get("is_ambiguous", False)) if isinstance(body, dict) else False
-            if conf >= 0.75 and gap >= 0.3 and amb:
-                ambiguous_high_conf += 1
-
-            records.append(
-                {
-                    "id": case["id"],
-                    "src": case["src"],
-                    "tgt": case["tgt"],
-                    "same_field_mode": same_field_mode,
-                    "status": r.status_code,
-                    "flagged_count": len(flagged),
-                    "bad_phrases": bad_phrases,
-                    "bad_analogs": bad_analogs,
-                    "is_ambiguous": amb,
-                    "predicted_src_confidence": conf,
-                    "top2_gap": gap,
-                }
-            )
-
-        # Explicit same-domain pass for clutter measurement.
-        payload_same = {
-            "text": case["text"],
-            "src": case["src"],
-            "tgt": case["src"],
-            "same_field_mode": "normal",
-            "max_terms": 8,
-        }
-        r_same = requests.post(f"{base}/annotate", json=payload_same, timeout=args.timeout)
-        body_same = r_same.json() if r_same.headers.get("content-type", "").startswith("application/json") else {"raw": r_same.text}
-        terms_same = body_same.get("terms", []) if isinstance(body_same, dict) else []
-        flagged_same = [t for t in terms_same if isinstance(t, dict) and bool(t.get("flagged"))]
-        if len(flagged_same) > 2:
-            same_domain_over_flagging += 1
-
-        records.append(
+    print(
+        json.dumps(
             {
-                "id": f"{case['id']}_same",
-                "src": case["src"],
-                "tgt": case["src"],
-                "same_field_mode": "normal",
-                "status": r_same.status_code,
-                "flagged_count": len(flagged_same),
-                "bad_phrases": [],
-                "bad_analogs": [],
-                "is_ambiguous": bool(body_same.get("is_ambiguous", False)) if isinstance(body_same, dict) else False,
-                "predicted_src_confidence": float(body_same.get("predicted_src_confidence", 0.0)) if isinstance(body_same, dict) else 0.0,
-                "top2_gap": float(body_same.get("top2_gap", 0.0)) if isinstance(body_same, dict) else 0.0,
-            }
+                "label": label,
+                "endpoint": api_base,
+                "report_md": str(md_path.resolve()),
+                "report_json": str(json_path.resolve()),
+                "success_count": result["success_count"],
+                "failure_count": result["failure_count"],
+            },
+            ensure_ascii=False,
         )
-
-    json_path = out_dir / f"term_lens_regression_{ts}.json"
-    json_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    md_path = out_dir / f"term_lens_regression_{ts}.md"
-    lines = [
-        "# Term Lens Regression Report",
-        "",
-        f"- Generated (UTC): {datetime.now(timezone.utc).isoformat()}",
-        f"- API Base: {base}",
-        f"- Cases: {len(cases)}",
-        "",
-        "## Aggregates",
-        "",
-        f"- bad phrase fragments: {bad_phrase_count}",
-        f"- bad analog suggestions: {bad_analog_count}",
-        f"- same-domain over-flagging events: {same_domain_over_flagging}",
-        f"- ambiguous while high-confidence events: {ambiguous_high_conf}",
-        "",
-        "## Case Table",
-        "",
-        "| Case | src->tgt | mode | status | flagged | ambiguous | conf | gap | bad_phrases | bad_analogs |",
-        "|---|---|---|---:|---:|---|---:|---:|---|---|",
-    ]
-    for r in records:
-        lines.append(
-            f"| {r['id']} | {r['src']}->{r['tgt']} | {r['same_field_mode']} | {r['status']} | {r['flagged_count']} | {r['is_ambiguous']} | {r['predicted_src_confidence']:.3f} | {r['top2_gap']:.3f} | {', '.join(r['bad_phrases'])} | {', '.join(r['bad_analogs'])} |"
-        )
-
-    md_path.write_text("\n".join(lines), encoding="utf-8")
-    print(json.dumps({"report_md": str(md_path.resolve()), "report_json": str(json_path.resolve())}, ensure_ascii=False))
+    )
 
 
 if __name__ == "__main__":

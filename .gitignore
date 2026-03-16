@@ -35,3 +35,7 @@ data/processed/**
 # Evaluation outputs
 logs/
 reports/
+
+# Local backend runtime/cache artifacts
+backend/*.sqlite3
+backend/pdf_cache/

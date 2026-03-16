@@ -7,8 +7,10 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from terms.canonicalize import canonicalize_span
 from terms.clean import clean_text_for_mining
 from terms.keyphrases import extract_yake_keyphrases_with_spans
+from terms.score import concept_likeness_score
 from terms.stoplist import load_all_stoplists, load_stoplist
 
 _SOURCE_RANK = {
@@ -41,8 +43,11 @@ VERB_LIKE = {
     "estimating",
     "estimate",
     "estimates",
+    "train",
+    "trains",
+    "training",
 }
-BASIC_CONNECTORS = {"to", "while", "under", "in", "for", "with", "and", "or", "on", "of", "by"}
+BASIC_CONNECTORS = {"to", "while", "under", "in", "for", "with", "and", "or", "on", "of", "by", "near"}
 LEADING_STRIP = {
     "the",
     "our",
@@ -95,20 +100,43 @@ GENERIC_ACADEMIC = {
     "result",
     "results",
 }
+GENERIC_SINGLE_BLOCK = {
+    "transformer",
+    "model",
+    "method",
+    "system",
+    "approach",
+}
+TECH_SINGLE_SUFFIXES = ("ity", "tion", "sion", "lysis", "kinetics", "dynamics")
 TECH_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b[A-Za-z]{1,4}\(\d+(?:,\d+)*\)-[A-Za-z]+(?:-[A-Za-z]+)*\b"),
     re.compile(r"\bk-space\b", re.IGNORECASE),
 ]
 ACRONYM_RE = re.compile(r"^[A-Z]{2,}(?:\d+)?$")
-SYMBOLIC_RE = re.compile(r"[()\\[\\]{}]|/|\\+|\\*")
+SYMBOLIC_RE = re.compile(r"[()\[\]{}\/+*]")
+FRAGMENT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^(?:optimize|optimizes|optimizing|train|trains|training)\s+(?:a|an|the)\s+\w+$", re.IGNORECASE),
+    re.compile(r"^memory\s+cost\s+on$", re.IGNORECASE),
+    re.compile(r"^on\s+long\s+sequences$", re.IGNORECASE),
+    re.compile(r"^(?:by\s+an|of\s+the)$", re.IGNORECASE),
+    re.compile(r"\b(?:is\s+characterized|characterized\s+by)\b", re.IGNORECASE),
+]
 
 
 @dataclass(frozen=True)
 class SpanTerm:
     term: str
+    surface_term: str
+    canonical_term: str
     start: int
     end: int
     source: str
+    concept_score: float = 0.0
+    noun_headed: bool = False
+    noun_adj_compound: bool = False
+    leading_pos: str = ""
+    leading_lemma: str = ""
+    overlapped_by_stronger: bool = False
 
 
 def set_nlp(nlp_obj: object) -> None:
@@ -177,6 +205,55 @@ def _is_acronym_or_symbolic(term: str) -> bool:
     return False
 
 
+def _has_fragment_pattern(term: str) -> bool:
+    t = _normalize_phrase(term)
+    if not t:
+        return True
+    if any(p.search(t) for p in FRAGMENT_PATTERNS):
+        return True
+    toks = [m.group(0).lower() for m in TOKEN_RE.finditer(t)]
+    if len(toks) >= 2 and toks[0] in VERB_LIKE:
+        return True
+    if len(toks) >= 2 and toks[0] in BASIC_CONNECTORS:
+        return True
+    if len(toks) >= 3 and any(tok in BASIC_CONNECTORS for tok in toks[1:-1]):
+        return True
+    if toks[:2] in (["by", "an"], ["of", "the"], ["on", "long"]):
+        return True
+    return False
+
+
+def _is_technical_single_word(term: str) -> bool:
+    t = _normalize_phrase(term)
+    if not t:
+        return False
+    if t in GENERIC_SINGLE_BLOCK:
+        return False
+    if _is_acronym_or_symbolic(term):
+        return True
+    if any(t.endswith(sfx) for sfx in TECH_SINGLE_SUFFIXES):
+        return True
+    return False
+
+
+def _span_linguistic_signals(doc: object | None, start: int, end: int) -> tuple[str, str, bool, bool]:
+    if doc is None:
+        return "", "", False, False
+    try:
+        span = doc.char_span(start, end, alignment_mode="expand")
+        if span is None or len(span) == 0:
+            return "", "", False, False
+        lead = span[0]
+        head = span[-1]
+        leading_pos = str(getattr(lead, "pos_", ""))
+        leading_lemma = str(getattr(lead, "lemma_", "") or getattr(lead, "text", "")).lower()
+        noun_headed = str(getattr(head, "pos_", "")) in {"NOUN", "PROPN"}
+        noun_adj_compound = all(str(getattr(tok, "pos_", "")) in {"NOUN", "PROPN", "ADJ", "NUM"} for tok in span)
+        return leading_pos, leading_lemma, noun_headed, noun_adj_compound
+    except Exception:
+        return "", "", False, False
+
+
 def normalize_phrase_span(text: str, start: int, end: int) -> Optional[tuple[int, int, str]]:
     segment = text[start:end]
     toks = _tokenize_with_span(segment)
@@ -187,7 +264,7 @@ def normalize_phrase_span(text: str, start: int, end: int) -> Optional[tuple[int
     right = len(toks) - 1
     while left <= right and toks[left].group(0).lower() in LEADING_STRIP:
         left += 1
-    while right >= left and toks[right].group(0).lower() in (TRAILING_STRIP | _STOP_ALL | VERB_LIKE | BASIC_CONNECTORS):
+    while right >= left and toks[right].group(0).lower() in (TRAILING_STRIP | VERB_LIKE | BASIC_CONNECTORS):
         right -= 1
     if left > right:
         return None
@@ -204,10 +281,11 @@ def normalize_phrase_span(text: str, start: int, end: int) -> Optional[tuple[int
     token_lowers = [t.lower() for t in clean_tokens]
 
     stop_ratio = sum(1 for t in token_lowers if t in _STOP_ALL) / max(1, len(token_lowers))
-    if stop_ratio > 0.4:
+    stop_cap = 0.6 if len(token_lowers) >= 2 else 0.4
+    if stop_ratio > stop_cap:
         return None
 
-    if len(clean_tokens) == 1 and not _is_acronym_or_symbolic(cleaned):
+    if len(clean_tokens) == 1 and not _is_technical_single_word(cleaned):
         return None
     if len(clean_tokens) > 5 and not _is_acronym_or_symbolic(cleaned):
         return None
@@ -216,7 +294,7 @@ def normalize_phrase_span(text: str, start: int, end: int) -> Optional[tuple[int
     if generic_ratio >= 0.6:
         return None
 
-    if any(t in VERB_LIKE for t in token_lowers):
+    if _has_fragment_pattern(cleaned):
         return None
 
     return new_start, new_end, cleaned
@@ -234,7 +312,14 @@ def _contains_debug(text: str) -> bool:
     return any(d and d in low for d in _DEBUG)
 
 
-def _valid_candidate(text: str) -> bool:
+def _valid_candidate(
+    text: str,
+    *,
+    leading_pos: str = "",
+    leading_lemma: str = "",
+    noun_headed: bool = False,
+    noun_adj_compound: bool = False,
+) -> bool:
     norm = _normalize_phrase(text)
     if len(norm) < 3:
         return False
@@ -245,15 +330,27 @@ def _valid_candidate(text: str) -> bool:
     if _is_stopword_only(norm):
         return False
     toks = [m.group(0).lower() for m in TOKEN_RE.finditer(norm)]
-    if any(t in VERB_LIKE for t in toks):
+    if _has_fragment_pattern(norm):
         return False
-    if any(t in BASIC_CONNECTORS for t in toks):
-        return False
-    if len(toks) == 1 and not _is_acronym_or_symbolic(text):
+    if len(toks) == 1 and not _is_technical_single_word(text):
         return False
     if len(toks) > 5 and not _is_acronym_or_symbolic(text):
         return False
-    if (sum(1 for t in toks if t in _STOP_ALL) / max(1, len(toks))) > 0.4:
+    stop_ratio = sum(1 for t in toks if t in _STOP_ALL) / max(1, len(toks))
+    stop_cap = 0.6 if len(toks) >= 2 else 0.4
+    if stop_ratio > stop_cap:
+        return False
+    concept_score = concept_likeness_score(
+        text,
+        leading_pos=leading_pos,
+        leading_lemma=leading_lemma,
+        noun_headed=noun_headed,
+        noun_adj_compound=noun_adj_compound,
+        lexicon_support=False,
+        evidence_support=False,
+        stronger_overlap=False,
+    )
+    if concept_score < 0.34:
         return False
     return True
 
@@ -276,12 +373,57 @@ def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
         doc = None
 
     items: list[SpanTerm] = []
+
+    def _append_candidate(s: int, e: int, source: str) -> None:
+        s2, e2, term = _refine_span(cleaned, s, e)
+        leading_pos, leading_lemma, noun_headed, noun_adj_compound = _span_linguistic_signals(doc, s2, e2)
+        canonical_terms = canonicalize_span(term)
+        if not canonical_terms and _valid_candidate(
+            term,
+            leading_pos=leading_pos,
+            leading_lemma=leading_lemma,
+            noun_headed=noun_headed,
+            noun_adj_compound=noun_adj_compound,
+        ):
+            canonical_terms = [term]
+        for canonical in canonical_terms:
+            if not _valid_candidate(
+                canonical,
+                leading_pos=leading_pos,
+                leading_lemma=leading_lemma,
+                noun_headed=noun_headed,
+                noun_adj_compound=noun_adj_compound,
+            ):
+                continue
+            concept_score = concept_likeness_score(
+                canonical,
+                leading_pos=leading_pos,
+                leading_lemma=leading_lemma,
+                noun_headed=noun_headed,
+                noun_adj_compound=noun_adj_compound,
+                lexicon_support=False,
+                evidence_support=False,
+                stronger_overlap=False,
+            )
+            items.append(
+                SpanTerm(
+                    term=canonical,
+                    surface_term=term,
+                    canonical_term=canonical,
+                    start=s2,
+                    end=e2,
+                    source=source,
+                    concept_score=concept_score,
+                    noun_headed=noun_headed,
+                    noun_adj_compound=noun_adj_compound,
+                    leading_pos=leading_pos,
+                    leading_lemma=leading_lemma,
+                )
+            )
+
     if doc is not None:
         for ent in getattr(doc, "ents", []):
-            term = cleaned[ent.start_char : ent.end_char]
-            s, e, term = _refine_span(cleaned, ent.start_char, ent.end_char)
-            if _valid_candidate(term):
-                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_entity"))
+            _append_candidate(ent.start_char, ent.end_char, "spacy_entity")
 
         try:
             for nc in doc.noun_chunks:
@@ -289,10 +431,7 @@ def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
                     continue
                 if len(nc) > 0 and nc[-1].pos_ not in {"NOUN", "PROPN"}:
                     continue
-                term = cleaned[nc.start_char : nc.end_char]
-                s, e, term = _refine_span(cleaned, nc.start_char, nc.end_char)
-                if _valid_candidate(term):
-                    items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
+                _append_candidate(nc.start_char, nc.end_char, "spacy_noun_chunk")
         except Exception:
             pass
 
@@ -302,10 +441,7 @@ def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
             left = min(tok.i, tok.head.i)
             right = max(tok.i, tok.head.i)
             span = doc[left : right + 1]
-            term = cleaned[span.start_char : span.end_char]
-            s, e, term = _refine_span(cleaned, span.start_char, span.end_char)
-            if _valid_candidate(term):
-                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_compound"))
+            _append_candidate(span.start_char, span.end_char, "spacy_compound")
 
         # adjective+noun technical phrases (e.g., sparse attention)
         for tok in doc:
@@ -317,25 +453,22 @@ def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
             left = min(tok.i, head.i)
             right = max(tok.i, head.i)
             span = doc[left : right + 1]
-            term = cleaned[span.start_char : span.end_char]
-            s, e, term = _refine_span(cleaned, span.start_char, span.end_char)
-            if _valid_candidate(term):
-                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
+            _append_candidate(span.start_char, span.end_char, "spacy_noun_chunk")
 
     # regex technical tokens to preserve forms like SE(3)-equivariant
     for patt in TECH_PATTERNS:
         for m in patt.finditer(cleaned):
-            term = cleaned[m.start() : m.end()]
-            s, e, term = _refine_span(cleaned, m.start(), m.end())
-            if _valid_candidate(term):
-                items.append(SpanTerm(term=term, start=s, end=e, source="spacy_entity"))
+            _append_candidate(m.start(), m.end(), "spacy_entity")
 
     # heuristic adjacent bigram/trigram phrases for technical style (deterministic fallback)
     matches = list(TOKEN_RE.finditer(cleaned))
+    allowed_stop_heads = {"model", "models"}
     for i in range(0, max(0, len(matches) - 1)):
         w1 = matches[i].group(0).lower()
         w2 = matches[i + 1].group(0).lower()
-        if w1 in _STOP_ALL or w2 in _STOP_ALL:
+        if w1 in LEADING_STRIP or w1 in BASIC_CONNECTORS:
+            continue
+        if (w2 in BASIC_CONNECTORS or w2 in TRAILING_STRIP) and w2 not in allowed_stop_heads:
             continue
         if w1 in VERB_LIKE or w2 in VERB_LIKE:
             continue
@@ -343,21 +476,17 @@ def _collect_spacy_candidates(text: str) -> list[SpanTerm]:
             continue
         s = matches[i].start()
         e = matches[i + 1].end()
-        s, e, term = _refine_span(cleaned, s, e)
-        if _valid_candidate(term):
-            items.append(SpanTerm(term=term, start=s, end=e, source="spacy_noun_chunk"))
+        _append_candidate(s, e, "spacy_noun_chunk")
 
         if i + 2 < len(matches):
             w3 = matches[i + 2].group(0).lower()
-            if w3 in _STOP_ALL or w3 in VERB_LIKE:
+            if ((w3 in BASIC_CONNECTORS or w3 in TRAILING_STRIP) and w3 not in allowed_stop_heads) or w3 in VERB_LIKE:
                 continue
             if matches[i + 1].end() + 1 != matches[i + 2].start():
                 continue
             s3 = matches[i].start()
             e3 = matches[i + 2].end()
-            s3, e3, term3 = _refine_span(cleaned, s3, e3)
-            if _valid_candidate(term3):
-                items.append(SpanTerm(term=term3, start=s3, end=e3, source="spacy_noun_chunk"))
+            _append_candidate(s3, e3, "spacy_noun_chunk")
 
     return items
 
@@ -382,22 +511,28 @@ def _is_technical(text: str) -> int:
 def _dedup_merge(candidates: list[SpanTerm]) -> list[SpanTerm]:
     ranked = sorted(
         candidates,
-        key=lambda s: (-_is_technical(s.term), -(s.end - s.start), -_SOURCE_RANK.get(s.source, 0), s.start),
+        key=lambda s: (-int(s.noun_headed), -_is_technical(s.term), -(s.end - s.start), -round(float(s.concept_score), 4), -_SOURCE_RANK.get(s.source, 0), s.start),
     )
     kept: list[SpanTerm] = []
     for c in ranked:
         skip = False
         for k in kept:
-            if _overlap_ratio(c, k) <= 0.5:
+            if c.start == k.start and c.end == k.end and _normalize_phrase(c.canonical_term) != _normalize_phrase(k.canonical_term):
+                continue
+            overlap = _overlap_ratio(c, k)
+            if overlap <= 0.5:
                 continue
             len_c = c.end - c.start
             len_k = k.end - k.start
+            if overlap >= 0.6 and len_k >= len_c and k.concept_score >= c.concept_score + 0.08:
+                skip = True
+                break
             if len_k >= len_c:
                 skip = True
                 break
             if c.source == "yake" and len_c > len_k:
                 continue
-            if _SOURCE_RANK.get(k.source, 0) >= _SOURCE_RANK.get(c.source, 0):
+            if len_k == len_c and _SOURCE_RANK.get(k.source, 0) >= _SOURCE_RANK.get(c.source, 0):
                 skip = True
                 break
         if not skip:
@@ -406,7 +541,7 @@ def _dedup_merge(candidates: list[SpanTerm]) -> list[SpanTerm]:
     uniq: list[SpanTerm] = []
     seen: set[tuple[str, int, int]] = set()
     for k in sorted(kept, key=lambda x: x.start):
-        key = (_normalize_phrase(k.term), k.start, k.end)
+        key = (_normalize_phrase(k.canonical_term), k.start, k.end)
         if key in seen:
             continue
         seen.add(key)
@@ -442,9 +577,24 @@ def extract_terms_profiled(text: str, max_terms: int = 12, yake_enabled: bool | 
             if normalized is None:
                 continue
             s, e, term = normalized
-            if not _valid_candidate(term):
-                continue
-            yake_terms.append(SpanTerm(term=term, start=s, end=e, source="yake"))
+            canonical_terms = canonicalize_span(term)
+            if not canonical_terms and _valid_candidate(term):
+                canonical_terms = [term]
+            for canonical in canonical_terms:
+                if not _valid_candidate(canonical):
+                    continue
+                concept_score = concept_likeness_score(canonical)
+                yake_terms.append(
+                    SpanTerm(
+                        term=canonical,
+                        surface_term=term,
+                        canonical_term=canonical,
+                        start=s,
+                        end=e,
+                        source="yake",
+                        concept_score=concept_score,
+                    )
+                )
     else:
         yake_terms = []
     t_yake = time.perf_counter() - t0
@@ -460,7 +610,23 @@ def extract_terms_profiled(text: str, max_terms: int = 12, yake_enabled: bool | 
     prioritized.sort(key=lambda s: s.start)
 
     return {
-        "terms": [{"term": s.term, "start": int(s.start), "end": int(s.end), "source": s.source} for s in prioritized],
+        "terms": [
+            {
+                "term": s.term,
+                "surface_term": s.surface_term,
+                "canonical_term": s.canonical_term,
+                "start": int(s.start),
+                "end": int(s.end),
+                "source": s.source,
+                "concept_score": round(float(s.concept_score), 4),
+                "noun_headed": bool(s.noun_headed),
+                "noun_adj_compound": bool(s.noun_adj_compound),
+                "leading_pos": s.leading_pos,
+                "leading_lemma": s.leading_lemma,
+                "overlapped_by_stronger": bool(s.overlapped_by_stronger),
+            }
+            for s in prioritized
+        ],
         "timings": {
             "spacy_extract_sec": round(t_spacy, 4),
             "yake_extract_sec": round(t_yake, 4),

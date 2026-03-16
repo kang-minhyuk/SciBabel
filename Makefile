@@ -1,10 +1,10 @@
 SHELL := /bin/zsh
-ROOT := $(PWD)
+ROOT := $(CURDIR)
 BACKEND := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend
 ARXIV_TARGET ?= 2000
 
-.PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test smoke smoke-phrases check spacy-model eval autotune diagnose bench smoke-prod-stability cloudrun-deploy regression-term-lens \
+.PHONY: setup dev dev-backend dev-frontend fetch-sample train-sample test smoke smoke-phrases check spacy-model eval autotune diagnose bench smoke-prod-stability cloudrun-deploy regression-term-lens regression-term-lens-local regression-term-lens-prod regression-term-lens-compare baseline-freeze-term-lens manual-eval-pack explanation-audit product-analytics-summary fragment-mini-suite fragment-full-suite test-pdf pdf-dev pdf-smoke pdf-manual-pack demo-pdf-local \
 	test-syntax fetch-arxiv fetch-chemrxiv fetch-openalex fetch-textmining build-corpus mine-terms train-clf validate-artifacts textmining-all diagnose-chemrxiv \
 	fetch-arxiv-csm fetch-arxiv-pm fetch-openalex-chem fetch-openalex-cheme fetch-all corpus-report test-backend smoke-auto build-artifacts check-startup smoke-render
 
@@ -41,6 +41,43 @@ test:
 
 test-backend:
 	cd $(BACKEND) && pytest -q
+
+test-pdf:
+	cd $(BACKEND) && pytest -q tests/test_pdf_extract.py tests/test_pdf_endpoints.py
+
+pdf-dev:
+	@echo "[pdf-dev] backend:  http://127.0.0.1:8000"
+	@echo "[pdf-dev] frontend: http://localhost:3000"
+	@echo "[pdf-dev] Ctrl+C to stop both"
+	@set -e; \
+	( cd $(BACKEND) && SCIBABEL_FAKE_LLM=1 uvicorn app:app --reload --host 127.0.0.1 --port 8000 ) & \
+	BACK_PID=$$!; \
+	( cd $(FRONTEND) && npm run dev ) & \
+	FRONT_PID=$$!; \
+	trap 'kill $$BACK_PID >/dev/null 2>&1 || true; kill $$FRONT_PID >/dev/null 2>&1 || true' EXIT INT TERM; \
+	wait
+
+pdf-smoke:
+	@set -e; \
+	if curl -sf http://127.0.0.1:8000/openapi.json | grep -q '"/pdf/annotate"'; then \
+		echo "[pdf-smoke] using existing PDF-capable backend at http://127.0.0.1:8000"; \
+		cd $(ROOT) && python3 scripts/eval/smoke_pdf_local.py --api-base http://127.0.0.1:8000; \
+	else \
+		echo "[pdf-smoke] starting temporary backend at http://127.0.0.1:8010"; \
+		cd $(BACKEND) && SCIBABEL_FAKE_LLM=1 uvicorn app:app --host 127.0.0.1 --port 8010 >/tmp/scibabel_pdf_smoke_backend.log 2>&1 & \
+		PID=$$!; \
+		trap 'kill $$PID >/dev/null 2>&1 || true' EXIT; \
+		for i in $$(seq 1 40); do \
+			curl -sf http://127.0.0.1:8010/health >/dev/null 2>&1 && break; \
+			sleep 1; \
+		done; \
+		cd $(ROOT) && python3 scripts/eval/smoke_pdf_local.py --api-base http://127.0.0.1:8010; \
+	fi
+
+pdf-manual-pack:
+	cd $(ROOT) && python3 scripts/eval/build_pdf_manual_eval_pack.py
+
+demo-pdf-local: pdf-smoke
 
 smoke:
 	@set -e; \
@@ -103,6 +140,49 @@ regression-term-lens:
 		sleep 1; \
 	done; \
 	cd $(ROOT) && python3 scripts/eval/run_term_lens_regression.py --api-base http://127.0.0.1:8000
+
+regression-term-lens-local:
+	@set -e; \
+	cd $(BACKEND) && SCIBABEL_ENV=production EVIDENCE_ENABLED=true YAKE_ENABLED=false SCIBABEL_FAKE_LLM=1 uvicorn app:app --host 127.0.0.1 --port 8000 >/tmp/scibabel_regression_term_lens_local.log 2>&1 & \
+	PID=$$!; \
+	trap 'kill $$PID >/dev/null 2>&1 || true' EXIT; \
+	for i in $$(seq 1 40); do \
+		curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done; \
+	cd $(ROOT) && python3 scripts/eval/run_term_lens_regression.py --label local --api-base http://127.0.0.1:8000
+
+regression-term-lens-prod:
+	cd $(ROOT) && python3 scripts/eval/run_term_lens_regression.py --label prod
+
+regression-term-lens-compare:
+	@set -e; \
+	cd $(BACKEND) && SCIBABEL_ENV=production EVIDENCE_ENABLED=true YAKE_ENABLED=false SCIBABEL_FAKE_LLM=1 uvicorn app:app --host 127.0.0.1 --port 8000 >/tmp/scibabel_regression_term_lens_compare.log 2>&1 & \
+	PID=$$!; \
+	trap 'kill $$PID >/dev/null 2>&1 || true' EXIT; \
+	for i in $$(seq 1 40); do \
+		curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done; \
+	cd $(ROOT) && python3 scripts/eval/run_term_lens_compare.py --local-api-base http://127.0.0.1:8000
+
+baseline-freeze-term-lens:
+	cd $(ROOT) && python3 scripts/eval/write_baseline_metadata.py
+
+manual-eval-pack:
+	cd $(ROOT) && python3 scripts/eval/build_manual_eval_pack.py
+
+explanation-audit:
+	cd $(ROOT) && python3 scripts/eval/run_explanation_audit.py
+
+product-analytics-summary:
+	cd $(ROOT) && python3 scripts/eval/summarize_product_analytics.py
+
+fragment-mini-suite:
+	cd $(ROOT) && python3 scripts/eval/run_fragment_suppression_mini_suite.py
+
+fragment-full-suite:
+	cd $(ROOT) && python3 scripts/eval/run_fragment_suppression_full_suite.py
 
 spacy-model:
 	python3 -m spacy download en_core_web_sm

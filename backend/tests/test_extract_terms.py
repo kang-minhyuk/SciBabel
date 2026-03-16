@@ -46,9 +46,9 @@ def test_acceptance_sentence_has_expected_phrases() -> None:
     items = extract_terms(text, max_terms=12)
     terms = [str(x["term"]).lower() for x in items]
     joined = " | ".join(terms)
-    assert "transformer" in joined
     assert "sparse attention" in joined
     assert "long-range dependencies" in joined
+    assert "transformer" not in terms
     assert "reduce" not in terms
     assert "while" not in terms
 
@@ -112,3 +112,70 @@ def test_extract_keeps_good_concept_phrases() -> None:
     assert "thermal conductivity" in joined
     assert "packed-bed reactor" in joined
     assert "model predictive control" in joined
+
+
+def test_fragment_case_1_graph_regularization_distribution_shift() -> None:
+    text = "We optimize a graph neural network with sparse regularization under distribution shift."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert "graph neural network" in terms
+    assert "sparse regularization" in terms
+    assert "distribution shift" in terms
+    assert "optimize a graph" not in terms
+
+
+def test_fragment_case_2_transformer_attention_fragments_removed() -> None:
+    text = "The transformer uses low-rank attention to reduce memory cost on long sequences."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert "low-rank attention" in terms
+    assert "memory cost on" not in terms
+    assert "on long sequences" not in terms
+    assert "the transformer" not in terms
+
+
+def test_fragment_case_3_phase_transition_order_parameter() -> None:
+    text = "The phase transition is characterized by an order parameter near criticality."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert "phase transition" in terms
+    assert "order parameter" in terms
+    assert "criticality" in terms
+    assert "by an" not in terms
+    assert "transition is characterized" not in terms
+    assert "parameter near criticality" not in terms
+
+
+def test_fragment_case_4_diffusion_model_classifier_free_guidance() -> None:
+    text = "We train a diffusion model with classifier-free guidance for molecular generation."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert "diffusion model" in terms
+    assert "classifier-free guidance" in terms
+    assert "molecular generation" in terms
+    assert "train a diffusion" not in terms
+
+
+def test_extract_canonical_optimize_graph_modifier_variant() -> None:
+    text = "We optimize a graph neural network with adaptive sparse regularization under distribution shift."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert {"graph neural network", "sparse regularization", "distribution shift"}.issubset(terms)
+    assert "optimize a graph" not in terms
+
+
+def test_extract_canonical_phase_transition_around_criticality() -> None:
+    text = "The phase transition is characterized by an order parameter around criticality."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert {"phase transition", "order parameter", "criticality"}.issubset(terms)
+    banned = {"by an", "transition is characterized", "parameter around criticality"}
+    assert terms.isdisjoint(banned)
+
+
+def test_extract_canonical_diffusion_robust_guidance_stable_generation() -> None:
+    text = "We train a diffusion model with robust classifier-free guidance for stable molecular generation."
+    items = extract_terms(text, max_terms=20)
+    terms = {str(x["term"]).lower() for x in items}
+    assert {"diffusion model", "classifier-free guidance", "molecular generation"}.issubset(terms)
+    assert "train a diffusion" not in terms
